@@ -1,0 +1,1602 @@
+diff --git a/src/cap_harness/api.py b/src/cap_harness/api.py
+--- a/src/cap_harness/api.py
++++ b/src/cap_harness/api.py
+@@ -1576,7 +1576,6 @@
+             ("navigate_to_pose", "execution"),
+             ("move_torso", "execution"),
+             ("reset_torso", "execution"),
+-            ("get_body_state", "metadata"),
+             ("plan_standoff_pose", "geometry"),
+             ("plan_approach_pose", "geometry"),
+             ("base_pose_is_free", "geometry"),
+diff --git a/src/cap_harness/configs/g2/geniesim-leaderboard/station.yaml b/src/cap_harness/configs/g2/geniesim-leaderboard/station.yaml
+--- a/src/cap_harness/configs/g2/geniesim-leaderboard/station.yaml
++++ b/src/cap_harness/configs/g2/geniesim-leaderboard/station.yaml
+@@ -93,12 +93,6 @@
+   # vector is empty. Other boards use other init states (e.g. G2_STATES_5
+   # [0, 0, 0.1745]): check before serving them.
+   hold: [0.0, 0.0, 0.11464]
+-  # Manipulation board (C5m, g2-v43): the tasks whose init head_state differs from the hold, per client task name
+-  # (GenieSim robot_init_states.py: take_wrong_item_shelf G2_STATES_5 [0, 0, 0.1745]; scoop_popcorn G2_STATES_6
+-  # [0, 0, 0]). Every other manipulation task starts with [0, 0, 0.11464] (G2_DEFAULT_STATES / _STATES_1 / _STATES_4).
+-  task_holds:
+-    take_wrong_item_shelf: [0.0, 0.0, 0.1745]
+-    scoop_popcorn: [0.0, 0.0, 0.0]
+   limits:
+     lower: [-1.571, -0.349, -0.524]
+     upper: [1.571, 0.349, 0.524]
+@@ -125,10 +119,9 @@
+ 
+ # [ASSUMED] base_link-frame box bounding both arms' reach. Refine once the
+ # planning scene is built from real FK.
+-# C5m (g2-v43): |y| up to 1.5 m for the sorting tasks (cartons on a shelf to y 1.17, the blue tray at y -1.01).
+ planning_workspace:
+-  lower: [-0.6, -1.5, -0.2]
+-  upper: [1.4, 1.5, 2.0]
++  lower: [-0.6, -1.0, -0.2]
++  upper: [1.4, 1.0, 2.0]
+ 
+ model:
+   # Paths are relative to cap_harness/g2/description unless absolute.
+@@ -246,28 +239,10 @@
+   # chunk of a motion and refreshes any observation read without depth.
+   need_depth: always
+   # After the program returns, hold in chunks of this many rows until GenieSim
+-  # ends the episode (its checkers run every 30 steps, whatever the chunk length;
+-  # the client replays a chunk of any length and stops it when the episode ends).
+-  # Spatial board (g2-v41): a failed stack / sort episode drains up to 1530 rows,
+-  # 51 requests of 30 rows (each 5-12 s on the leaderboard) vs 11 of 150.
+-  drain_chunk_rows: 150
++  # ends the episode (its checkers run every 30 steps).
++  drain_chunk_rows: 30
+   # One relay connection = one leaderboard session = a fresh episode.
+   new_connection_new_episode: true
+-  # Robust board (camposgen moves the wrist cameras on their mounts; the wire has no camera poses): at each
+-  # episode's first request estimate each wrist's true mount against the head and the table, and correct its FK
+-  # pose when it is clearly off (rotation >= 3 deg; unperturbed wrists stay within 0.2 deg, 1.2 deg in backgen's room).
+-  # cap_harness.g2.wrist_calibration.
+-  wrist_self_calibration: true
+-  # Robust board (camqualgen sends a camera's frame all black with probability 0.1-0.5 per request): a black frame is
+-  # replaced by the camera's last good frame while its arm holds still, else answered with one-row holds (at most 6
+-  # per observation) until it comes back. Unperturbed frames are never black, so nothing changes there.
+-  black_frame_guard: true
+-  # Manipulation board (C5m, g2-v43): seven of its tasks start with another waist (GenieSim G2_STATES_1 / _4 / _5)
+-  # and the sorting tasks turn it. Every plan / IK request carries the live waist (the commanded target once the
+-  # program moved it) and the task's head as the planner's locked joints; the cuRobo service keys one planner per
+-  # lock map (aspire g2-v43 service.py; the older service ignores the field and keeps its environment lock).
+-  planner_lock_from_request: true
+-  planner_lock_quantum_rad: 0.001
+ 
+ gdk:
+   # GDK deployment: the robot's corobot is the client of a PolicyServer we host.
+diff --git a/src/cap_harness/contracts.py b/src/cap_harness/contracts.py
+--- a/src/cap_harness/contracts.py
++++ b/src/cap_harness/contracts.py
+@@ -939,21 +939,10 @@
+     joint_names: Mapping[str, Sequence[str]]
+     base_transforms: Mapping[str, np.ndarray]
+     end_effector_links: Mapping[str, str]
+-    lock_joints: Mapping[str, float] | None = None
+-    """Values for the planner model's non-arm joints (e.g. a waist that moves between episodes), or None to use the
+-    planner service's own configuration."""
+ 
+     def __post_init__(self) -> None:
+         embodiment = _non_empty_string(self.embodiment, "embodiment")
+         joint_dimension = _joint_dimension(embodiment)
+-        if self.lock_joints is not None:
+-            locks = {
+-                _non_empty_string(name, "lock_joints name"): float(value)
+-                for name, value in _mapping(self.lock_joints, "lock_joints", allow_empty=True).items()
+-            }
+-            if not all(np.isfinite(value) for value in locks.values()):
+-                raise ValueError("lock_joints values must be finite")
+-            object.__setattr__(self, "lock_joints", MappingProxyType(locks))
+         raw_names = _mapping(self.joint_names, "joint_names", allow_empty=False)
+         names = {
+             arm: _string_tuple(value, f"joint_names[{arm!r}]", length=joint_dimension)
+diff --git a/src/cap_harness/g2/adapter.py b/src/cap_harness/g2/adapter.py
+--- a/src/cap_harness/g2/adapter.py
++++ b/src/cap_harness/g2/adapter.py
+@@ -27,11 +27,8 @@
+ from __future__ import annotations
+ 
+ from collections.abc import Mapping, Sequence
+-import dataclasses
+-import logging
+ import math
+ import time
+-from types import MappingProxyType
+ from typing import TYPE_CHECKING, Any
+ 
+ import numpy as np
+@@ -50,7 +47,7 @@
+ )
+ from cap_harness.errors import ApiError, ErrorCode
+ from cap_harness.g2 import codec
+-from cap_harness.g2.codec import ARM_DOF, ARMS, CAMERAS, HEAD_DOF, WAIST_DOF, G2Request
++from cap_harness.g2.codec import ARM_DOF, ARMS, CAMERAS, G2Request
+ from cap_harness.g2.config import G2StationConfig, load_g2_station_config
+ from cap_harness.g2.geniesim_bridge import GenieSimBridge
+ from cap_harness.g2.registry import G2TaskMetadata, G2TaskRegistry
+@@ -58,23 +55,6 @@
+ if TYPE_CHECKING:
+     from cap_harness.g2.kinematics import G2Kinematics
+     from cap_harness.g2.resolver import InstructionResolver
+-
+-logger = logging.getLogger(__name__)
+-
+-#: Robust board (camqualgen): upstream ``corobotpolicy`` drops a camera's frame with probability 0.1-0.5 per request by
+-#: sending it all black (``apply_camera_image_augmentation``). A frame whose brightest pixel is below this is dropped.
+-BLACK_FRAME_MAX = 3
+-#: One-row holds a single observation may spend waiting for cameras that came black and have no usable substitute.
+-BLACK_REFRESH_MAX = 6
+-#: A dropped frame is replaced by the camera's last good frame only while its carrier holds still: the largest joint
+-#: change, in radians, of the arm a wrist rides on (both arms for the head, whose view they cross).
+-SUBSTITUTE_JOINT_TOL_RAD = 0.01
+-
+-
+-def is_black(rgb: np.ndarray) -> bool:
+-    """True for a dropped (all-black) camera frame."""
+-    return int(np.max(rgb)) < BLACK_FRAME_MAX if np.size(rgb) else True
+-
+ 
+ #: ``task_progress`` entries whose ``STATUS`` means the stage is complete. GenieSim
+ #: reports ``PENDING`` until a stage resolves; the completed token is accepted in
+@@ -204,27 +184,6 @@
+             camera_fk = self._kinematics.camera_fk_hook()
+         self._fk = fk or None
+         self._camera_fk = camera_fk or None
+-        # Robust board (camposgen): per-episode wrist mount corrections from the self-check at reset()
+-        # (cap_harness.g2.wrist_calibration). The wrapper returns FK's pose unchanged for any camera without one, so
+-        # an unperturbed scene is served exactly as before.
+-        self._wrist_corrections: dict[str, np.ndarray] = {}
+-        self.wrist_calibration: dict[str, Any] | None = None
+-        self._calibration_pending = False
+-        if self._camera_fk is not None:
+-            nominal_camera_fk = self._camera_fk
+-
+-            def camera_fk_with_corrections(camera: str, request: G2Request) -> np.ndarray:
+-                pose = nominal_camera_fk(camera, request)
+-                correction = self._wrist_corrections.get(camera)
+-                return (
+-                    pose if correction is None else np.asarray(pose, dtype=np.float64) @ correction
+-                )
+-
+-            self._camera_fk = camera_fk_with_corrections
+-        # Robust board (camqualgen): per camera the last good RGB frame and its carrier's joints (black_frame_guard).
+-        self._valid_frames: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+-        self._substituted_sequences: set[int] = set()
+-        self.black_frame_stats: dict[str, int] = {"substituted": 0, "refreshes": 0, "unresolved": 0}
+         geniesim = self._station.geniesim
+         self._reset_timeout_s = (
+             float(geniesim.reset_timeout_s) if reset_timeout_s is None else float(reset_timeout_s)
+@@ -244,9 +203,6 @@
+         self._started = False
+         self._last_seen_sequence = -1
+         self._last_row: np.ndarray | None = None
+-        # Manipulation board (sorting): the waist target once the program commands one (move_torso); every row after
+-        # that carries it (21 columns), holds included, so the torso never falls back to an uncommanded state.
+-        self._waist_target: np.ndarray | None = None
+         self._depth_refreshes = 0
+         self._gone_since: float | None = None
+         self._hold_last_command = geniesim.keepalive_hold_target == "last_command"
+@@ -323,13 +279,8 @@
+         return self._tick / self.control_frequency
+ 
+     def _observation_from(self, request: G2Request) -> Observation:
+-        # The wrist self-check needs every camera's depth: an episode's first request has it only when GenieSim
+-        # sends it (later instructions of one GenieSim process often start without), so it runs at the first
+-        # depth-complete request, before any observation is built from it.
+-        if self._calibration_pending and request.depth_complete:
+-            self._calibrate_wrists(request)
+         return codec.observation(
+-            self._guarded(request),
++            request,
+             self._station,
+             task_context=self._task_context,
+             fk=self._fk,
+@@ -337,69 +288,6 @@
+             timestamp_s=self._timestamp(),
+         )
+ 
+-    @staticmethod
+-    def _carrier_joints(camera: str, request: G2Request) -> np.ndarray:
+-        if camera == "hand_left":
+-            return np.asarray(request.left_joints, dtype=np.float64)
+-        if camera == "hand_right":
+-            return np.asarray(request.right_joints, dtype=np.float64)
+-        return np.asarray(request.arm_joints, dtype=np.float64)
+-
+-    def _guarded(self, request: G2Request) -> G2Request:
+-        """Robust board (camqualgen): each black camera frame replaced by that camera's last good frame while its
+-        carrier still holds the pose it was taken from (station ``geniesim.black_frame_guard``). The request itself
+-        when the guard is off or nothing is black, so an unperturbed episode is served exactly as before.
+-        """
+-        if not self._station.geniesim.black_frame_guard:
+-            return request
+-        images = dict(request.images)
+-        replaced = []
+-        for camera, rgb in request.images.items():
+-            carrier = self._carrier_joints(camera, request)
+-            if not is_black(rgb):
+-                self._valid_frames[camera] = (rgb, carrier)
+-                continue
+-            stored = self._valid_frames.get(camera)
+-            if stored is not None and stored[1].shape == carrier.shape:
+-                if float(np.max(np.abs(stored[1] - carrier))) <= SUBSTITUTE_JOINT_TOL_RAD:
+-                    images[camera] = stored[0]
+-                    replaced.append(camera)
+-        if not replaced:
+-            return request
+-        if request.sequence not in self._substituted_sequences:
+-            self._substituted_sequences.add(request.sequence)
+-            self.black_frame_stats["substituted"] += 1
+-            logger.info(
+-                "black frame guard: request %d %s replaced by the last good frame",
+-                request.sequence,
+-                replaced,
+-            )
+-        return dataclasses.replace(request, images=MappingProxyType(images))
+-
+-    def _refresh_black(self, request: G2Request) -> G2Request:
+-        """One-row holds until no camera of the (guarded) observation is black, at most ``BLACK_REFRESH_MAX``."""
+-        if not self._station.geniesim.black_frame_guard or not self._started:
+-            return request
+-        for _ in range(BLACK_REFRESH_MAX):
+-            black = [name for name, rgb in self._guarded(request).images.items() if is_black(rgb)]
+-            if not black:
+-                return request
+-            self.black_frame_stats["refreshes"] += 1
+-            logger.info(
+-                "black frame guard: request %d %s black, one-row hold", request.sequence, black
+-            )
+-            following, error = self._send_chunk(
+-                self._hold_row(request).reshape(1, -1),
+-                source="black_frame_refresh",
+-                force_depth=True,
+-            )
+-            if error is not None or following is None:
+-                return request
+-            request = following
+-        if any(is_black(rgb) for rgb in self._guarded(request).images.values()):
+-            self.black_frame_stats["unresolved"] += 1
+-        return request
+-
+     def _state_from(self, request: G2Request) -> RobotState:
+         return codec.robot_state(request, self._station, fk=self._fk, timestamp_s=self._timestamp())
+ 
+@@ -417,9 +305,8 @@
+         request: G2Request,
+         joints: Mapping[str, np.ndarray] | None = None,
+         grippers: Mapping[str, float] | None = None,
+-        waist: np.ndarray | None = None,
+     ) -> np.ndarray:
+-        """One chunk row: commanded joints where given, the measured ones elsewhere; the waist target once set."""
++        """One chunk row: commanded joints where given, the measured ones elsewhere."""
+         parts: list[np.ndarray] = []
+         for side in ARMS:
+             target = None if joints is None else joints.get(side)
+@@ -432,17 +319,7 @@
+         for side in ARMS:
+             value = None if grippers is None else grippers.get(side)
+             widths.append(self._latched(side, request) if value is None else float(value))
+-        if waist is None:
+-            waist = self._waist_target
+-        if waist is None:
+-            return np.concatenate([*parts, np.asarray(widths, dtype=np.float64)])
+-        return np.concatenate(
+-            [*parts, np.asarray(widths, dtype=np.float64), np.asarray(waist, dtype=np.float64).reshape(WAIST_DOF)]
+-        )
+-
+-    def _row_width(self) -> int:
+-        """Columns of a chunk row now: 16, or 21 once the waist has been commanded this episode."""
+-        return codec.CHUNK_WIDTH if self._waist_target is None else codec.CHUNK_WIDTH_WITH_WAIST
++        return np.concatenate([*parts, np.asarray(widths, dtype=np.float64)])
+ 
+     def _commanded_action(self, row: np.ndarray) -> RobotAction:
+         """The ``RobotAction`` a chunk row commands, for the recorder."""
+@@ -707,23 +584,14 @@
+         self._started = True
+         self._last_seen_sequence = request.sequence
+         self._last_row = None
+-        self._waist_target = None
+         self._depth_refreshes = 0
+         self._tick = 0
+         self._chunks_sent = 0
+         self._success_observed_step = None
+         self._done_request = None
+         self._gripper_latch = {}
+-        self._valid_frames = {}
+-        self._substituted_sequences = set()
+-        self.black_frame_stats = {"substituted": 0, "refreshes": 0, "unresolved": 0}
+         self._latch_from(request)
+         self.end_pose_check = self._check_end_poses(request)
+-        self._wrist_corrections = {}
+-        self.wrist_calibration = None
+-        self._calibration_pending = bool(
+-            self._station.geniesim.wrist_self_calibration and self._camera_fk is not None
+-        )
+         if not isinstance(task_ref, TaskContext):
+             self._task_context = self._task_context_for(request)
+         observation = self._observation_from(request)
+@@ -739,52 +607,8 @@
+             )
+             if self.end_pose_check is not None:
+                 metadata["end_pose_fk_check"] = self.end_pose_check
+-            if self.wrist_calibration is not None:
+-                metadata["wrist_calibration"] = self.wrist_calibration
+-            elif self._calibration_pending:
+-                metadata["wrist_calibration"] = {"pending": "first request without depth"}
+             self._run_observer.on_reset(observation, metadata)  # type: ignore[attr-defined]
+         return observation
+-
+-    def _calibrate_wrists(self, request: G2Request) -> None:
+-        """The wrist self-check on the episode's first depth-complete request (``geniesim.wrist_self_calibration``).
+-
+-        Estimated with the nominal poses (corrections cleared first); only estimates that pass the module's gates
+-        become corrections. A failure leaves the nominal poses and is recorded, never raised.
+-        """
+-        self._calibration_pending = False
+-        self._wrist_corrections = {}
+-        self.wrist_calibration = None
+-        if not self._station.geniesim.wrist_self_calibration or self._camera_fk is None:
+-            return
+-        from cap_harness.g2.wrist_calibration import calibrate_wrists
+-
+-        started = time.monotonic()
+-        try:
+-            results = calibrate_wrists(request, self._station, self._camera_fk)
+-        except Exception as exc:  # the self-check must never cost an episode
+-            self.wrist_calibration = {"error": f"{type(exc).__name__}: {exc}"[:160]}
+-            return
+-        self._wrist_corrections = {
+-            name: item.correction for name, item in results.items() if item.applied
+-        }
+-        self.wrist_calibration = {name: item.summary() for name, item in results.items()}
+-        self.wrist_calibration["seconds"] = round(time.monotonic() - started, 3)
+-        self.wrist_calibration["request"] = request.sequence
+-        logger.info(
+-            "wrist self-check (client episode %s, request %d): %s",
+-            request.episode_idx,
+-            request.sequence,
+-            {
+-                name: (
+-                    item.applied,
+-                    round(item.rotation_deg, 2),
+-                    round(1000.0 * item.translation_m, 1),
+-                    item.reason,
+-                )
+-                for name, item in results.items()
+-            },
+-        )
+ 
+     def _check_end_poses(self, request: G2Request) -> dict[str, Any] | None:
+         if self._kinematics is None:
+@@ -849,7 +673,6 @@
+             refreshed = self._depth_refresh(request)
+             if refreshed is not None:
+                 request = refreshed
+-        request = self._refresh_black(request)
+         return self._observation_from(request)
+ 
+     @property
+@@ -994,7 +817,7 @@
+                 ),
+             )
+         count = max(len(value) for value in per_arm.values())
+-        rows = np.empty((count, self._row_width()), dtype=np.float64)
++        rows = np.empty((count, codec.CHUNK_WIDTH), dtype=np.float64)
+         for index in range(count):
+             joints = {side: value[min(index, len(value) - 1)] for side, value in per_arm.items()}
+             grippers = {
+@@ -1171,7 +994,7 @@
+             else max(1, int(math.ceil(float(duration) * self.control_frequency)))
+         )
+         alphas = np.linspace(0.0, 1.0, rows_count + 1)[1:]
+-        rows = np.empty((rows_count, self._row_width()), dtype=np.float64)
++        rows = np.empty((rows_count, codec.CHUNK_WIDTH), dtype=np.float64)
+         for index, alpha in enumerate(alphas):
+             joints = {
+                 side: (1.0 - alpha) * np.asarray(request.arm(side), dtype=np.float64)
+@@ -1237,33 +1060,7 @@
+             joint_names={side: self._station.arms[side].joint_names for side in ARMS},
+             base_transforms={side: np.eye(4, dtype=np.float64) for side in ARMS},
+             end_effector_links={side: self._station.arms[side].tool_frame for side in ARMS},
+-            lock_joints=self.planner_lock_joints(),
+-        )
+-
+-    def planner_lock_joints(self) -> dict[str, float] | None:
+-        """The torso the planner should assume now (``geniesim.planner_lock_from_request``), else None.
+-
+-        Waist: the commanded target once the program moved it, else the reported waist rounded to
+-        ``planner_lock_quantum_rad`` (one cached planner per distinct map; the reported waist sits at the task's start
+-        state). Head: the request's, else the task's init head (``head.task_holds``). FK keeps the exact values.
+-        """
+-        geniesim = self._station.geniesim
+-        if not geniesim.planner_lock_from_request:
+-            return None
+-        request = self._bridge.latest()
+-        if request is None:
+-            return None
+-        if self._waist_target is not None:
+-            waist = np.asarray(self._waist_target, dtype=np.float64)
+-        else:
+-            quantum = float(geniesim.planner_lock_quantum_rad)
+-            waist = np.round(np.asarray(request.waist_joints, dtype=np.float64) / quantum) * quantum
+-        head = np.asarray(request.head_joints, dtype=np.float64).reshape(-1)
+-        if head.size != HEAD_DOF:
+-            head = np.asarray(self._station.head.hold_for(request.task_name), dtype=np.float64)
+-        locks = {name: round(float(value), 6) for name, value in zip(self._station.waist.joint_names, waist)}
+-        locks.update({name: round(float(value), 6) for name, value in zip(self._station.head.joint_names, head)})
+-        return locks
++        )
+ 
+     def planning_workspace(self) -> tuple[np.ndarray, np.ndarray]:
+         return self._station.planning_workspace_lower, self._station.planning_workspace_upper
+@@ -1312,192 +1109,6 @@
+             "chunks_sent": self._chunks_sent,
+         }
+ 
+-    # -- torso (manipulation board) ------------------------------------------
+-
+-    def move_torso(
+-        self,
+-        target: Sequence[float],
+-        *,
+-        speed_rad_s: float = 0.3,
+-        settle_rows: int = 15,
+-    ) -> ExecutionResult:
+-        """Turn the waist to ``target`` (5 joints in ``waist.joint_names`` order, radians).
+-
+-        Rows interpolate from the current waist target (the reported waist before the first command) with the joint
+-        that moves most at ``speed_rad_s``, then hold ``settle_rows`` rows. The arms hold their last command (else
+-        their reported joints) and the grippers stay latched. Every later row of the episode carries this target
+-        (holds included), and with ``planner_lock_from_request`` the planner's torso follows it. GenieSim's client
+-        applies a reply's ``waist`` block (``corobotpolicy._parse_result``; ``pi_env.step``).
+-        """
+-        try:
+-            request = self._require_request()
+-        except RuntimeError as exc:
+-            return ExecutionResult(
+-                ok=False,
+-                steps_executed=0,
+-                error=ApiError(code=ErrorCode.ADAPTER_FAILED, message=str(exc)),
+-            )
+-        waist = self._station.waist
+-        try:
+-            goal = np.asarray(target, dtype=np.float64).reshape(WAIST_DOF)
+-            speed = float(speed_rad_s)
+-            settle = int(settle_rows)
+-        except (TypeError, ValueError) as exc:
+-            return ExecutionResult(
+-                ok=False,
+-                steps_executed=0,
+-                error=ApiError(code=ErrorCode.INVALID_REQUEST, message=f"move_torso: {exc}"),
+-            )
+-        if (
+-            not np.all(np.isfinite(goal))
+-            or np.any(goal < waist.limits_lower)
+-            or np.any(goal > waist.limits_upper)
+-            or not np.isfinite(speed)
+-            or speed <= 0.0
+-            or settle < 0
+-        ):
+-            return ExecutionResult(
+-                ok=False,
+-                steps_executed=0,
+-                error=ApiError(
+-                    code=ErrorCode.INVALID_REQUEST,
+-                    message="move_torso: the target must lie within the waist limits, speed > 0, settle >= 0",
+-                    details={
+-                        "target": goal.tolist(),
+-                        "lower": waist.limits_lower.tolist(),
+-                        "upper": waist.limits_upper.tolist(),
+-                    },
+-                ),
+-            )
+-        start = (
+-            np.asarray(request.waist_joints, dtype=np.float64)
+-            if self._waist_target is None
+-            else np.asarray(self._waist_target, dtype=np.float64)
+-        )
+-        travel = float(np.max(np.abs(goal - start)))
+-        moving = max(1, int(math.ceil(travel / speed * self.control_frequency)))
+-        held = None
+-        if self._last_row is not None:
+-            held = {
+-                side: self._last_row[index * ARM_DOF : (index + 1) * ARM_DOF]
+-                for index, side in enumerate(ARMS)
+-            }
+-        alphas = np.linspace(0.0, 1.0, moving + 1)[1:]
+-        rows = [self._row(request, held, None, waist=(1.0 - alpha) * start + alpha * goal) for alpha in alphas]
+-        rows += [self._row(request, held, None, waist=goal)] * settle
+-        self._waist_target = goal.copy()
+-        chunks = self._chunks(np.vstack(rows))
+-        sent = 0
+-        following: G2Request | None = None
+-        for number, chunk in enumerate(chunks):
+-            following, error = self._send_chunk(
+-                chunk, source="move_torso", observe_next=number == len(chunks) - 1
+-            )
+-            if error is not None:
+-                terminated = error.code is ErrorCode.TERMINATED
+-                final = self._done_request if terminated else None
+-                return ExecutionResult(
+-                    ok=False,
+-                    steps_executed=sent,
+-                    final_observation=None if final is None else self._observation_from(final),
+-                    terminated=terminated,
+-                    error=error,
+-                )
+-            sent += len(chunk)
+-        assert following is not None
+-        measured = np.asarray(following.waist_joints, dtype=np.float64)
+-        residual = float(np.max(np.abs(measured - goal)))
+-        return ExecutionResult(
+-            ok=True,
+-            steps_executed=sent,
+-            final_observation=self._observation_from(following),
+-            final_errors={"waist": residual},
+-            diagnostics={
+-                "waist_start": start.tolist(),
+-                "waist_target": goal.tolist(),
+-                "waist_measured": measured.tolist(),
+-                "waist_residual_rad": residual,
+-                "rows": len(rows),
+-                "ticks": self._tick,
+-            },
+-        )
+-
+-    def get_body_state(
+-        self,
+-        waist: Sequence[float] | None = None,
+-        left: Sequence[float] | None = None,
+-        right: Sequence[float] | None = None,
+-    ) -> dict[str, Any]:
+-        """Torso and arm geometry now, from the robot's own kinematics (joint readings, no scene state).
+-
+-        ``waist`` (reported), ``waist_target`` (commanded this episode, or None), ``head`` (reported, else the
+-        task's init head), per arm the base-frame origins of its seven joints (``joint_origins``) with the tool
+-        position and approach axis, and the head camera's position and optical axis. Never raises.
+-
+-        g2-v44 (C5n): ``waist`` / ``left`` / ``right`` (optional) evaluate the same FK for those body or arm joints
+-        instead of the reported ones (``hypothetical`` is then True) - e.g. to find a torso move that carries both
+-        held arms without turning them. Per arm ``tool_x_axis`` is reported too, and ``body_origins`` (the five body
+-        links' origins, body joint 1 first). Nothing moves.
+-        """
+-        kinematics = self._kinematics
+-        if kinematics is None:
+-            return {"ok": False, "error": "no kinematic model"}
+-        try:
+-            request = self._require_request()
+-            head = np.asarray(request.head_joints, dtype=np.float64).reshape(-1)
+-            if head.size != HEAD_DOF:
+-                head = kinematics.head_hold(request.task_name)
+-            hypothetical = waist is not None or left is not None or right is not None
+-            body = request.waist_joints if waist is None else np.asarray(waist, dtype=np.float64).reshape(WAIST_DOF)
+-            left_joints = request.left_joints if left is None else np.asarray(left, dtype=np.float64).reshape(ARM_DOF)
+-            right_joints = request.right_joints if right is None else np.asarray(right, dtype=np.float64).reshape(ARM_DOF)
+-            if not (np.all(np.isfinite(body)) and np.all(np.isfinite(left_joints)) and np.all(np.isfinite(right_joints))):
+-                return {"ok": False, "error": "non-finite joints"}
+-            positions = kinematics.joint_map(
+-                left=left_joints,
+-                right=right_joints,
+-                waist=body,
+-                head=head,
+-            )
+-            arms: dict[str, Any] = {}
+-            for side in ARMS:
+-                arm = self._station.arms[side]
+-                origins = [
+-                    kinematics.link_pose(kinematics.model.joints[name].child, positions)[:3, 3].tolist()
+-                    for name in arm.joint_names
+-                ]
+-                tool = kinematics.link_pose(arm.tool_frame, positions)
+-                arms[side] = {
+-                    "joint_origins": origins,
+-                    "tool_position": tool[:3, 3].tolist(),
+-                    "tool_z_axis": tool[:3, 2].tolist(),
+-                    "tool_x_axis": tool[:3, 0].tolist(),
+-                }
+-            camera = kinematics.camera_pose(
+-                "head",
+-                left=left_joints,
+-                right=right_joints,
+-                waist=body,
+-                head=head,
+-            )
+-            body_origins = [
+-                kinematics.link_pose(kinematics.model.joints[name].child, positions)[:3, 3].tolist()
+-                for name in self._station.waist.joint_names
+-            ]
+-        except Exception as exc:  # a program-facing tool never raises
+-            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+-        return {
+-            "ok": True,
+-            "hypothetical": hypothetical,
+-            "waist": np.asarray(body, dtype=np.float64).tolist(),
+-            "waist_reported": np.asarray(request.waist_joints, dtype=np.float64).tolist(),
+-            "waist_target": None if self._waist_target is None else self._waist_target.tolist(),
+-            "head": head.tolist(),
+-            "arms": arms,
+-            "body_origins": body_origins,
+-            "head_camera": {"position": camera[:3, 3].tolist(), "forward": camera[:3, 2].tolist()},
+-        }
+-
+     # -- instruction resolution --------------------------------------------
+ 
+     @property
+@@ -1539,7 +1150,7 @@
+             text = "" if context is None else context.language
+         text = " ".join(str(text).split())
+         try:
+-            observation = self._observation_from(self._refresh_black(self._require_request()))
++            observation = self._observation_from(self._require_request())
+         except Exception as exc:  # a program-facing tool never raises
+             return failure(text, f"no observation available: {exc}").to_dict()
+         camera = observation.cameras.get(str(camera_name))
+diff --git a/src/cap_harness/g2/config.py b/src/cap_harness/g2/config.py
+--- a/src/cap_harness/g2/config.py
++++ b/src/cap_harness/g2/config.py
+@@ -16,7 +16,7 @@
+ from __future__ import annotations
+ 
+ from collections.abc import Mapping
+-from dataclasses import dataclass, field
++from dataclasses import dataclass
+ import hashlib
+ from pathlib import Path
+ import re
+@@ -202,13 +202,6 @@
+     hold: np.ndarray
+     limits_lower: np.ndarray
+     limits_upper: np.ndarray
+-    task_holds: Mapping[str, np.ndarray] = field(default_factory=lambda: MappingProxyType({}))
+-    """Head pose per client task name where the task's init state differs from ``hold`` (the wire carries no head
+-    joints; GenieSim keeps the head at the task's ``head_state``)."""
+-
+-    def hold_for(self, task_name: str | None) -> np.ndarray:
+-        """The head pose GenieSim holds for ``task_name`` (``hold`` unless ``task_holds`` lists the task)."""
+-        return self.task_holds.get(str(task_name or "").strip(), self.hold)
+ 
+ 
+ @dataclass(frozen=True, slots=True)
+@@ -333,21 +326,6 @@
+ 
+     new_connection_new_episode: bool = False
+     """Treat a fresh client connection as a new episode (serve mode behind the relay)."""
+-
+-    black_frame_guard: bool = False
+-    """Replace an all-black (dropped) camera frame by that camera's last good frame while its carrier holds still,
+-    else answer with one-row holds until it comes back (robust board ``camqualgen``)."""
+-
+-    wrist_self_calibration: bool = False
+-    """Estimate each wrist camera's true mount at the episode's first request and correct its FK pose when it is
+-    measurably off (robust board ``camposgen``; :mod:`cap_harness.g2.wrist_calibration`)."""
+-
+-    planner_lock_from_request: bool = False
+-    """Send the planner the live waist (and the task's head pose) as its locked joints with every plan / IK request,
+-    so the cuRobo model's torso follows the episode's start state and any commanded waist (manipulation board)."""
+-
+-    planner_lock_quantum_rad: float = 0.002
+-    """Grid the measured waist is rounded to for the planner lock (one cached planner per distinct lock map)."""
+ 
+ 
+ @dataclass(frozen=True, slots=True)
+@@ -603,20 +581,11 @@
+     head_lower, head_upper = _limits(raw_head.get("limits"), "head.limits", HEAD_DOF)
+     head_hold = _readonly_array(raw_head.get("hold"), "head.hold", (HEAD_DOF,))
+     _within(head_hold, head_lower, head_upper, "head.hold")
+-    raw_task_holds = raw_head.get("task_holds") or {}
+-    if not isinstance(raw_task_holds, Mapping):
+-        raise ValueError("head.task_holds must map task names to head poses")
+-    task_holds: dict[str, np.ndarray] = {}
+-    for task_name, value in raw_task_holds.items():
+-        task_hold = _readonly_array(value, f"head.task_holds.{task_name}", (HEAD_DOF,))
+-        _within(task_hold, head_lower, head_upper, f"head.task_holds.{task_name}")
+-        task_holds[str(task_name)] = task_hold
+     head = G2HeadConfig(
+         joint_names=_names(raw_head.get("joint_names"), "head.joint_names", HEAD_DOF),
+         hold=head_hold,
+         limits_lower=head_lower,
+         limits_upper=head_upper,
+-        task_holds=MappingProxyType(task_holds),
+     )
+ 
+     raw_gripper = data.get("gripper")
+@@ -718,12 +687,6 @@
+         ),
+         drain_chunk_rows=int(raw_geniesim.get("drain_chunk_rows", 30)),
+         new_connection_new_episode=bool(raw_geniesim.get("new_connection_new_episode", False)),
+-        black_frame_guard=bool(raw_geniesim.get("black_frame_guard", False)),
+-        wrist_self_calibration=bool(raw_geniesim.get("wrist_self_calibration", False)),
+-        planner_lock_from_request=bool(raw_geniesim.get("planner_lock_from_request", False)),
+-        planner_lock_quantum_rad=_positive(
+-            raw_geniesim.get("planner_lock_quantum_rad", 0.002), "geniesim.planner_lock_quantum_rad"
+-        ),
+     )
+     if geniesim.chunk_len <= 0:
+         raise ValueError("geniesim.chunk_len must be positive")
+diff --git a/src/cap_harness/g2/kinematics.py b/src/cap_harness/g2/kinematics.py
+--- a/src/cap_harness/g2/kinematics.py
++++ b/src/cap_harness/g2/kinematics.py
+@@ -452,12 +452,6 @@
+         parent = self.link_pose(config.parent_link, positions)
+         return parent @ config.T_parent_from_camera @ config.optical_correction
+ 
+-    def head_hold(self, task_name: str | None) -> np.ndarray:
+-        """The head pose to assume when the wire carries none: the task's init head (``head.task_holds``), else
+-        ``head.hold``. The manipulation board starts two tasks with another head pitch (GenieSim
+-        ``robot_init_states.py``: take_wrong_item_shelf G2_STATES_5 0.1745, scoop_popcorn G2_STATES_6 0)."""
+-        return np.asarray(self.station.head.hold_for(task_name), dtype=np.float64)
+-
+     # -- codec hooks -------------------------------------------------------
+ 
+     def fk_hook(self) -> Callable[[str, Any, Any], np.ndarray]:
+@@ -486,7 +480,7 @@
+                 left=request.left_joints,
+                 right=request.right_joints,
+                 waist=request.waist_joints,
+-                head=head if np.asarray(head).size else self.head_hold(getattr(request, "task_name", None)),
++                head=head if np.asarray(head).size else None,
+             )
+ 
+         return camera_fk
+diff --git a/src/cap_harness/g2/registry.py b/src/cap_harness/g2/registry.py
+--- a/src/cap_harness/g2/registry.py
++++ b/src/cap_harness/g2/registry.py
+@@ -34,11 +34,6 @@
+     "manip": "manipulation",
+ }
+ BOARDS = ("instruction", "spatial", "manipulation")
+-
+-
+-#: Sub-task names GenieSim reports for a listed task under another name: ``g2op_manip_bimanual_hold_pot.yaml`` sets
+-#: ``sub_task_name: hold_pot`` (and ``robot_init_states.py`` keys the task as ``hold_pot``).
+-TASK_NAME_ALIASES: dict[str, str] = {"hold_pot": "bimanual_hold_pot"}
+ 
+ 
+ class G2RegistryError(ValueError):
+@@ -83,33 +78,10 @@
+ 
+ 
+ #: ``step_out`` budgets read from GenieSim's ``benchmark/config/llm_task/<task>/*/instructions.json``.
+-#: Spatial board (problems.json, upstream 6ca11c7): each stage's ``StepOut N`` starts when the stage starts and its
+-#: last check that can still score is 30 * (N // 30 + 1) rows later (checks run every 30 rows); the horizon is the
+-#: sum of those over the task's stages plus one check of margin, so the run recorder never stops a program GenieSim
+-#: would still score (pick: 200 + 200 -> 420; place: 300 + 600 -> 960; sort: 1200 -> 1230; stack: 1500 -> 1530).
+-#: Manipulation board (C5m, problems.json upstream 6ca11c7), the same rule: open_door 450 -> 480; hold_pot 900 + 900 ->
+-#: 1860; pour 900 -> 930; stock 300 + 300 + 600 + 600 + 300 -> 2250; take_wrong 300 + 400 -> 750; scoop 900 -> 930; clean
+-#: 4 x 600 + 300 -> 2850; place_block 200 + 200 + 400 -> 840; sorting 600 + 300 + 3 x 900 -> 3750; continuous: the whole
+-#: list sits in one ``StepOut 6000`` -> 6030 (each package's chain also has its own 1500).
+ KNOWN_HORIZONS: dict[str, int] = {
+-    "open_door": 510,
+-    "bimanual_hold_pot": 1890,
+-    "pour_workpiece": 960,
+-    "stock_and_straighten_shelf": 2280,
+-    "take_wrong_item_shelf": 780,
+-    "scoop_popcorn": 960,
+-    "clean_the_desktop": 2880,
+-    "place_block_into_box": 870,
+-    "sorting_packages": 3780,
+-    "sorting_packages_continuous": 6060,
+-    "pick_object_absolute_position": 450,
+-    "pick_object_relative_position": 450,
+-    "place_beverage_to_anothers_position": 990,
+-    "place_object_relative_position": 990,
+-    "sort_cubes_by_size": 1260,
+-    "sort_number": 1260,
+-    "stack_bowls": 1560,
+-    "stack_three_building_blocks": 1560,
++    "open_door": 450,
++    "bimanual_hold_pot": 900,
++    "clean_the_desktop": 600,
+ }
+ 
+ _TASK_TABLE: tuple[tuple[str, str, str], ...] = (
+@@ -226,7 +198,6 @@
+                     raise G2RegistryError("conflicting G2 task ids")
+                 task_id = int(encoded)
+         name = str(name).strip()
+-        name = TASK_NAME_ALIASES.get(name, name)
+         if name in self._by_name:
+             task = self._by_name[name]
+             if task_id is not None and int(task_id) != task.task_id:
+@@ -246,9 +217,8 @@
+             ) from exc
+ 
+     def by_task_name(self, task_name: str) -> G2TaskMetadata | None:
+-        """Metadata for the sub-task name the client reports (or its alias), or None when unlisted."""
+-        name = str(task_name).strip()
+-        return self._by_name.get(name) or self._by_name.get(TASK_NAME_ALIASES.get(name, ""))
++        """Metadata for the sub-task name the client reports, or None when unlisted."""
++        return self._by_name.get(str(task_name).strip())
+ 
+ 
+ __all__ = [
+@@ -259,7 +229,6 @@
+     "G2_GENIESIM_TASKS",
+     "KNOWN_HORIZONS",
+     "TASKS_BY_BOARD",
+-    "TASK_NAME_ALIASES",
+     "G2RegistryError",
+     "G2TaskMetadata",
+     "G2TaskRegistry",
+diff --git a/src/cap_harness/g2/resolver.py b/src/cap_harness/g2/resolver.py
+--- a/src/cap_harness/g2/resolver.py
++++ b/src/cap_harness/g2/resolver.py
+@@ -30,8 +30,7 @@
+ from __future__ import annotations
+ 
+ from collections.abc import Mapping, Sequence
+-from dataclasses import asdict, dataclass, replace
+-import json
++from dataclasses import asdict, dataclass
+ import math
+ import os
+ import re
+@@ -75,14 +74,6 @@
+     re.IGNORECASE,
+ )
+ _BOX_KEYS = ("box_xyxy_norm", "box_xyxy", "bbox_2d", "bbox", "box")
+-_NUMBER = r"(-?\d+(?:\.\d+)?)"
+-# A box counts only with its fourth number closed off (a bracket, a comma or whitespace after it):
+-# a reply cut inside that number ("..., 81") would otherwise salvage a wrong coordinate.
+-_SALVAGE_BOX = re.compile(
+-    r'"(?:box_xyxy_norm|box_xyxy|bbox_2d|bbox|box)"\s*:\s*\[\s*'
+-    + r"\s*,\s*".join([_NUMBER] * 4)
+-    + r"(?=\s*[\],\s])"
+-)
+ 
+ 
+ def vlm_url() -> str:
+@@ -122,8 +113,7 @@
+     ``None`` when the model could not point at the object. ``visible`` is the
+     model's own claim that the object is in view; a ``False`` comes with a low
+     ``confidence``. ``ok`` is False only when no usable answer was obtained,
+-    with the reason in ``error``. ``salvaged`` marks an answer read from a reply
+-    that was cut off before its JSON closed (see :func:`salvage_document`).
++    with the reason in ``error``.
+     """
+ 
+     ok: bool
+@@ -144,7 +134,6 @@
+     model: str = ""
+     attempts: int = 1
+     raw: str = ""
+-    salvaged: bool = False
+ 
+     def to_dict(self) -> dict[str, Any]:
+         """A JSON-like ``dict`` (lists, not tuples) for the generated-program namespace."""
+@@ -355,57 +344,6 @@
+     return best
+ 
+ 
+-def _salvaged_string(text: str, key: str) -> str | None:
+-    match = re.search(r'"' + key + r'"\s*:\s*"((?:[^"\\]|\\.)*)"', text)
+-    if match is None:
+-        return None
+-    try:
+-        return json.loads('"' + match.group(1) + '"')
+-    except ValueError:
+-        return match.group(1)
+-
+-
+-def salvage_document(text: Any) -> dict[str, Any] | None:
+-    """The complete fields of a reply that stops before its JSON closes, or ``None``.
+-
+-    With thinking on, Qwen3.6 sometimes spends nearly all of ``max_tokens`` on
+-    reasoning and the answer is cut mid-object (finish_reason "length"); the
+-    content is then not empty, so the empty-content retry never ran. Measured
+-    over every logged instruction-board call (2026-10-28): 71 of ~3700 replies
+-    were cut this way, 63 of them after a complete ``query`` and 47 after a
+-    complete box. Only fields whose value is closed are read: a string up to its
+-    closing quote, a box whose four numbers are all followed by a delimiter, a
+-    list up to its closing bracket. Without a ``query`` there is nothing to use.
+-    """
+-    if not isinstance(text, str):
+-        return None
+-    query = _salvaged_string(text, "query")
+-    if not query:
+-        return None
+-    document: dict[str, Any] = {"query": query}
+-    for key in ("arm", "selection_rule", "rationale"):
+-        value = _salvaged_string(text, key)
+-        if value is not None:
+-            document[key] = value
+-    box = _SALVAGE_BOX.search(text)
+-    if box is not None:
+-        document["box_xyxy_norm"] = [float(value) for value in box.groups()]
+-    alternatives = re.search(r'"alternatives"\s*:\s*(\[[^\[\]]*\])', text)
+-    if alternatives is not None:
+-        try:
+-            document["alternatives"] = json.loads(alternatives.group(1))
+-        except ValueError:
+-            pass
+-    for key in ("visible", "place_back"):
+-        flag = re.search(r'"' + key + r'"\s*:\s*(true|false)\b', text)
+-        if flag is not None:
+-            document[key] = flag.group(1) == "true"
+-    confidence = re.search(r'"confidence"\s*:\s*' + _NUMBER + r"(?=\s*[,}\s])", text)
+-    if confidence is not None:
+-        document["confidence"] = float(confidence.group(1))
+-    return document
+-
+-
+ def failure(
+     instruction: str,
+     error: str,
+@@ -450,23 +388,19 @@
+     """
+     width, height = int(width), int(height)
+     raw = text if isinstance(text, str) else ""
+-    salvaged = False
+     try:
+         documents = extract_documents(text)
+     except GroundingError as exc:
+-        partial = salvage_document(text)
+-        if partial is None:
+-            return failure(
+-                instruction,
+-                f"unparseable reply: {exc}",
+-                width=width,
+-                height=height,
+-                raw=raw,
+-                latency_s=latency_s,
+-                model=model,
+-                attempts=attempts,
+-            )
+-        documents, salvaged = [partial], True
++        return failure(
++            instruction,
++            f"unparseable reply: {exc}",
++            width=width,
++            height=height,
++            raw=raw,
++            latency_s=latency_s,
++            model=model,
++            attempts=attempts,
++        )
+     document = _pick_document(documents)
+     query = _as_text(document.get("query") or document.get("label"), MAX_PHRASE_CHARS)
+     visible = _as_bool(document.get("visible"), default=True)
+@@ -509,7 +443,6 @@
+         model=model,
+         attempts=attempts,
+         raw=raw[:MAX_RAW_CHARS],
+-        salvaged=salvaged,
+     )
+ 
+ 
+@@ -607,9 +540,7 @@
+ 
+         With thinking on, a reply whose reasoning exhausted ``max_tokens`` has
+         no content; that call is retried once with thinking off (fast, and
+-        enough for the plain boards) before giving up. A reply cut off after the
+-        answer began is salvaged when it already names the object
+-        (:func:`salvage_document`); one cut before that is retried the same way.
++        enough for the plain boards) before giving up.
+         """
+         instruction = " ".join(str(instruction or "").split())
+         if not instruction:
+@@ -646,7 +577,7 @@
+                 model=self.model,
+                 attempts=attempts,
+             )
+-        result = parse_reply(
++        return parse_reply(
+             content,
+             instruction,
+             width,
+@@ -655,28 +586,6 @@
+             model=self.model,
+             attempts=attempts,
+         )
+-        if (
+-            result.ok
+-            or attempts > 1
+-            or not self.enable_thinking
+-            or not str(result.error).startswith("unparseable")
+-        ):
+-            return result
+-        content, error, retry_s = self._complete(jpeg, instruction, enable_thinking=False)
+-        latency_s += retry_s
+-        if error is None and content is not None:
+-            retried = parse_reply(
+-                content,
+-                instruction,
+-                width,
+-                height,
+-                latency_s=latency_s,
+-                model=self.model,
+-                attempts=2,
+-            )
+-            if retried.ok:
+-                return retried
+-        return replace(result, latency_s=latency_s, attempts=2)
+ 
+     def resolve_rgb(self, rgb: Any, instruction: str) -> ResolvedInstruction:
+         """:meth:`resolve` for an ``(H, W, 3)`` RGB array (uint8 or float in [0, 1])."""
+@@ -712,7 +621,6 @@
+     "failure",
+     "parse_reply",
+     "place_back_in_instruction",
+-    "salvage_document",
+     "vlm_model",
+     "vlm_url",
+ ]
+diff --git a/src/cap_harness/g2/wrist_calibration.py b/src/cap_harness/g2/wrist_calibration.py
+deleted file mode 100644
+--- a/src/cap_harness/g2/wrist_calibration.py
++++ /dev/null
+@@ -1,366 +0,0 @@
+-# Copyright (c) 2026 FF EAI Robotics Ecosystem Inc. All rights reserved. See LICENSE-FF.txt.
+-"""Wrist-camera extrinsic self-check for the G2 GenieSim leaderboard (robust board, ``camposgen``).
+-
+-The leaderboard wire carries no camera poses (``camera_pose_source: fk``): every camera is placed with FK and its
+-USD mount. The robust board's ``camposgen`` generator moves the two wrist cameras on their gripper mounts (x, y
+-+-1 cm, a fixed 1 cm lift, roll / pitch / yaw +-10 deg; upstream ``generalization_utils``
+-``_apply_camera_position_perturbation``), so FK alone places everything a wrist sees several centimetres off and
+-the planning scene fuses those points as phantom obstacles. The head camera is never moved.
+-
+-At the episode's first request (head and both wrists with depth, the arms at their start pose) each wrist's true
+-pose is estimated against the head and the table:
+-
+-1. the wrist depth beyond the gripper's self-view is back-projected through the lens model (as the planning scene);
+-2. the dominant plane within 40 deg of horizontal is the table: it is rotated level about the camera centre and
+-   moved to the head's table height (two rotations, one translation);
+-3. points 6 mm - 15 cm above the table (the objects) of head and wrist are rasterised (4 mm); the yaw about the
+-   vertical through the camera centre (+-20 deg) and the in-plane shift (+-12 cm) that overlap them best are found
+-   by FFT cross-correlation;
+-4. a few rounds of point-to-point ICP on objects and table refine all six degrees of freedom.
+-
+-The result is ``E`` in the wrist's optical frame (``T_base_from_optical_true = T_nominal @ E``); it rides on the
+-gripper, so it holds for the whole episode. It is applied only when its rotation is at least ``MIN_ROTATION_DEG``
+-and the fit is sound (enough table and object points, the objects overlap better than with the nominal pose, a small
+-ICP residual, a plausible size). Otherwise the nominal pose stands, so an unperturbed scene is served exactly as
+-before. Live estimates (C5i, 922 wrist cameras): camposgen 6.6-14.6 deg (the platform's seed-1 draws 4.5-15.6 deg);
+-unperturbed scenes <= 0.2 deg, except backgen's room up to 1.2 deg / 13 mm (other structure in the wrist's view),
+-which the first threshold (0.6 deg or 12 mm) let through on 11 of 68 backgen wrist cameras.
+-"""
+-
+-from __future__ import annotations
+-
+-from dataclasses import dataclass, field
+-from typing import Any
+-
+-import numpy as np
+-
+-from cap_harness.geometry import undistort_normalized
+-
+-#: Below this the estimate is noise: <= 0.22 deg on 718 instruction-board wrist frames, <= 1.2 deg in backgen's room;
+-#: camposgen's mount rotations are >= 4.5 deg on the platform's draws (|r| < 3 deg on ~1.4 % of draws, then ~1 cm at
+-#: the hover). Translation alone never triggers a correction (backgen's room reached 13 mm).
+-MIN_ROTATION_DEG = 3.0
+-#: Above these the estimate is not a mount perturbation (camposgen: <= ~17.3 deg, <= ~17 mm).
+-MAX_ROTATION_DEG = 25.0
+-MAX_TRANSLATION_M = 0.06
+-#: Fit quality gates.
+-MIN_PLANE_INLIERS = 3000
+-MIN_OBJECT_POINTS = 150
+-MIN_OVERLAP = 0.55
+-MAX_ICP_RMS_M = 0.008
+-
+-DEPTH_STEP = 4  # back-project every 4th pixel of the 1280 x 1056 wrist depth (~85k points)
+-HEAD_STEP = 2
+-SELF_VIEW_M = 0.16  # the wrist sees its own open gripper at 4-13 cm
+-FAR_M = 1.5
+-PLANE_TOL_M = 0.004
+-PLANE_MAX_TILT_DEG = 40.0
+-BAND_LOW_M = 0.006
+-BAND_HIGH_M = 0.15
+-CELL_M = 0.004
+-GRID_LO = (0.15, -0.8)
+-GRID_SIZE_M = (1.2, 1.6)
+-YAW_RANGE_DEG = 20.0
+-SHIFT_RANGE_M = 0.12
+-ICP_ROUNDS = 8
+-ICP_MATCH_M = 0.02
+-TABLE_SEARCH_M = 0.02
+-
+-
+-@dataclass(frozen=True)
+-class WristCorrection:
+-    """One wrist's estimate; ``correction`` is applied (right-multiplied) only when ``applied``."""
+-
+-    camera: str
+-    correction: np.ndarray
+-    applied: bool
+-    reason: str
+-    rotation_deg: float = 0.0
+-    translation_m: float = 0.0
+-    info: dict[str, Any] = field(default_factory=dict)
+-
+-    def summary(self) -> dict[str, Any]:
+-        out = {
+-            "applied": self.applied,
+-            "reason": self.reason,
+-            "rotation_deg": round(self.rotation_deg, 3),
+-            "translation_mm": round(1000.0 * self.translation_m, 2),
+-        }
+-        out.update(self.info)
+-        return out
+-
+-
+-def _rotation_angle_deg(R: np.ndarray) -> float:
+-    return float(np.degrees(np.arccos(np.clip((np.trace(R) - 1.0) / 2.0, -1.0, 1.0))))
+-
+-
+-def _axis_angle(axis: np.ndarray, angle: float) -> np.ndarray:
+-    norm = float(np.linalg.norm(axis))
+-    if norm < 1e-12 or angle == 0.0:
+-        return np.eye(3)
+-    k = axis / norm
+-    K = np.array([[0.0, -k[2], k[1]], [k[2], 0.0, -k[0]], [-k[1], k[0], 0.0]])
+-    return np.eye(3) + np.sin(angle) * K + (1.0 - np.cos(angle)) * (K @ K)
+-
+-
+-def _about(R: np.ndarray, pivot: np.ndarray) -> np.ndarray:
+-    T = np.eye(4)
+-    T[:3, :3] = R
+-    T[:3, 3] = pivot - R @ pivot
+-    return T
+-
+-
+-def _apply(T: np.ndarray, P: np.ndarray) -> np.ndarray:
+-    return P @ T[:3, :3].T + T[:3, 3]
+-
+-
+-def back_project(
+-    depth: np.ndarray, K: np.ndarray, distortion: Any, step: int, near: float, far: float
+-) -> np.ndarray:
+-    """Optical-frame points of every ``step``-th pixel with ``near < depth < far`` (OpenCV lens model)."""
+-    d = np.asarray(depth, dtype=np.float64)[::step, ::step]
+-    h, w = d.shape
+-    v, u = np.mgrid[0 : h * step : step, 0 : w * step : step]
+-    ok = np.isfinite(d) & (d > near) & (d < far)
+-    z = d[ok]
+-    x = (u[ok] - K[0][2]) / K[0][0]
+-    y = (v[ok] - K[1][2]) / K[1][1]
+-    if distortion is not None and any(float(c) != 0.0 for c in distortion):
+-        x, y = undistort_normalized(x, y, distortion)
+-    return np.stack([x * z, y * z, z], axis=1)
+-
+-
+-def fit_table_plane(P: np.ndarray, *, iterations: int = 400, sample: int = 6000, seed: int = 0):
+-    """RANSAC over a subsample + least squares: (normal up, centroid, inlier mask) of the dominant near-level plane."""
+-    if len(P) < 100:
+-        return None
+-    rng = np.random.default_rng(seed)
+-    S = P[rng.integers(0, len(P), size=min(sample, len(P)))]
+-    idx = rng.integers(0, len(S), size=(iterations, 3))
+-    a, b, c = S[idx[:, 0]], S[idx[:, 1]], S[idx[:, 2]]
+-    n = np.cross(b - a, c - a)
+-    norm = np.linalg.norm(n, axis=1)
+-    ok = norm > 1e-9
+-    n[ok] /= norm[ok, None]
+-    n[n[:, 2] < 0] *= -1.0
+-    ok &= n[:, 2] >= np.cos(np.radians(PLANE_MAX_TILT_DEG))
+-    if not ok.any():
+-        return None
+-    n, a = n[ok], a[ok]
+-    d = -np.einsum("ij,ij->i", n, a)
+-    counts = (np.abs(S @ n.T + d) < PLANE_TOL_M).sum(axis=0)
+-    k = int(np.argmax(counts))
+-    inliers = np.abs(P @ n[k] + d[k]) < PLANE_TOL_M
+-    Q = P[inliers]
+-    centroid = Q.mean(axis=0)
+-    _, _, vt = np.linalg.svd(Q - centroid, full_matrices=False)
+-    normal = vt[2] if vt[2][2] >= 0 else -vt[2]
+-    inliers = np.abs((P - centroid) @ normal) < PLANE_TOL_M
+-    return normal, centroid, inliers
+-
+-
+-def _occupancy(P: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
+-    ij = np.floor((P[:, :2] - np.asarray(GRID_LO)) / CELL_M).astype(int)
+-    ok = (ij[:, 0] >= 0) & (ij[:, 0] < shape[0]) & (ij[:, 1] >= 0) & (ij[:, 1] < shape[1])
+-    grid = np.zeros(shape)
+-    grid[ij[ok, 0], ij[ok, 1]] = 1.0
+-    return grid
+-
+-
+-def _best_shift(FH: np.ndarray, W: np.ndarray, shape: tuple[int, int]) -> tuple[float, int, int]:
+-    corr = np.fft.irfft2(FH * np.conj(np.fft.rfft2(W)), s=shape)
+-    lim = int(SHIFT_RANGE_M / CELL_M)
+-    window = np.full(corr.shape, -np.inf)
+-    rows = np.r_[0 : lim + 1, shape[0] - lim : shape[0]]
+-    cols = np.r_[0 : lim + 1, shape[1] - lim : shape[1]]
+-    window[np.ix_(rows, cols)] = corr[np.ix_(rows, cols)]
+-    k = np.unravel_index(int(np.argmax(window)), corr.shape)
+-    si = int(k[0]) if k[0] <= shape[0] // 2 else int(k[0]) - shape[0]
+-    sj = int(k[1]) if k[1] <= shape[1] // 2 else int(k[1]) - shape[1]
+-    return float(window[k]) / max(1.0, float(W.sum())), si, sj
+-
+-
+-def estimate_wrist_correction(
+-    *,
+-    camera: str,
+-    head_points_base: np.ndarray,
+-    wrist_points_optical: np.ndarray,
+-    wrist_pose: np.ndarray,
+-    table_z_hint: float,
+-) -> WristCorrection:
+-    """The wrist's correction ``E`` (optical frame) from head points (base frame) and its own optical-frame points."""
+-    identity = np.eye(4)
+-    Ph = np.asarray(head_points_base, dtype=np.float64)
+-    near_table = Ph[(np.abs(Ph[:, 2] - table_z_hint) < TABLE_SEARCH_M) & (Ph[:, 0] > 0.3)]
+-    table_z = float(np.median(near_table[:, 2])) if len(near_table) > 100 else float(table_z_hint)
+-    T_nom = np.asarray(wrist_pose, dtype=np.float64)
+-    P = _apply(T_nom, np.asarray(wrist_points_optical, dtype=np.float64))
+-    info: dict[str, Any] = {"table_z": round(table_z, 4), "wrist_points": int(len(P))}
+-    plane = fit_table_plane(P)
+-    if plane is None:
+-        return WristCorrection(camera, identity, False, "no table plane", info=info)
+-    normal, _, inliers = plane
+-    info["plane_inliers"] = int(inliers.sum())
+-    if inliers.sum() < MIN_PLANE_INLIERS:
+-        return WristCorrection(camera, identity, False, "too few table points", info=info)
+-    centre = T_nom[:3, 3]
+-    tilt = float(np.arccos(min(1.0, float(normal[2]))))
+-    info["plane_tilt_deg"] = round(float(np.degrees(tilt)), 3)
+-    T1 = _about(_axis_angle(np.cross(normal, [0.0, 0.0, 1.0]), tilt), centre)
+-    P1 = _apply(T1, P)
+-    T2 = np.eye(4)
+-    T2[2, 3] = table_z - float(np.median(P1[inliers][:, 2]))
+-    level = T2 @ T1
+-
+-    def band(Q: np.ndarray) -> np.ndarray:
+-        keep = (
+-            (Q[:, 2] > table_z + BAND_LOW_M)
+-            & (Q[:, 2] < table_z + BAND_HIGH_M)
+-            & (Q[:, 0] > 0.25)
+-            & (Q[:, 0] < 1.2)
+-            & (np.abs(Q[:, 1]) < 0.7)
+-        )
+-        return Q[keep]
+-
+-    Oh, Ow = band(Ph), band(_apply(level, P))
+-    info["object_points_head"], info["object_points_wrist"] = int(len(Oh)), int(len(Ow))
+-    if len(Oh) < MIN_OBJECT_POINTS or len(Ow) < MIN_OBJECT_POINTS:
+-        return WristCorrection(camera, identity, False, "too few object points", info=info)
+-    shape = (int(round(GRID_SIZE_M[0] / CELL_M)), int(round(GRID_SIZE_M[1] / CELL_M)))
+-    FH = np.fft.rfft2(_occupancy(Oh, shape))
+-    vertical = np.array([0.0, 0.0, 1.0])
+-    best: tuple[float, float, int, int] | None = None
+-
+-    def search(angles: np.ndarray) -> None:
+-        nonlocal best
+-        for angle in angles:
+-            Tr = _about(_axis_angle(vertical, float(np.radians(angle))), centre)
+-            W = _occupancy(_apply(Tr, Ow), shape)
+-            if W.sum() < 10:
+-                continue
+-            score, si, sj = _best_shift(FH, W, shape)
+-            if best is None or score > best[0]:
+-                best = (score, float(angle), si, sj)
+-
+-    search(np.arange(-YAW_RANGE_DEG, YAW_RANGE_DEG + 1e-9, 1.0))
+-    if best is None:
+-        return WristCorrection(camera, identity, False, "no object overlap", info=info)
+-    search(np.arange(best[1] - 1.0, best[1] + 1.0 + 1e-9, 0.2))
+-    score, yaw, si, sj = best
+-    # The nominal pose's own overlap (no levelling, yaw or shift): the correction must beat it.
+-    W0 = _occupancy(band(P), shape)
+-    corr0 = float((_occupancy(Oh, shape) * W0).sum()) / max(1.0, float(W0.sum()))
+-    info.update(
+-        {
+-            "yaw_deg": round(yaw, 2),
+-            "shift_mm": [round(1000.0 * si * CELL_M, 1), round(1000.0 * sj * CELL_M, 1)],
+-            "overlap": round(score, 3),
+-            "overlap_nominal": round(corr0, 3),
+-        }
+-    )
+-    Ts = np.eye(4)
+-    Ts[0, 3], Ts[1, 3] = si * CELL_M, sj * CELL_M
+-    T_world = Ts @ _about(_axis_angle(vertical, float(np.radians(yaw))), centre) @ level
+-    # ICP on objects + table, from the coarse estimate (points expressed back in the nominal frame).
+-    table_head = near_table[:: max(1, len(near_table) // 4000)]
+-    tree_points = np.vstack([Oh, table_head]) if len(table_head) else Oh
+-    src_nominal = np.vstack(
+-        [_apply(np.linalg.inv(level), Ow), P[inliers][:: max(1, int(inliers.sum()) // 4000)]]
+-    )
+-    rms = None
+-    try:
+-        from scipy.spatial import cKDTree
+-
+-        tree = cKDTree(tree_points)
+-        for _ in range(ICP_ROUNDS):
+-            S = _apply(T_world, src_nominal)
+-            dist, j = tree.query(S, distance_upper_bound=ICP_MATCH_M)
+-            ok = np.isfinite(dist)
+-            if ok.sum() < 50:
+-                break
+-            A, B = S[ok], tree_points[j[ok]]
+-            ca, cb = A.mean(axis=0), B.mean(axis=0)
+-            U, _, Vt = np.linalg.svd((A - ca).T @ (B - cb))
+-            D = np.eye(3)
+-            D[2, 2] = np.sign(np.linalg.det(Vt.T @ U.T))
+-            R = Vt.T @ D @ U.T
+-            dT = np.eye(4)
+-            dT[:3, :3] = R
+-            dT[:3, 3] = cb - R @ ca
+-            T_world = dT @ T_world
+-            rms = float(np.sqrt(np.mean(dist[ok] ** 2)))
+-    except Exception as exc:  # scipy missing or a degenerate fit: keep the coarse estimate
+-        info["icp_error"] = str(exc)[:80]
+-    info["icp_rms_mm"] = None if rms is None else round(1000.0 * rms, 2)
+-    E = np.linalg.inv(T_nom) @ T_world @ T_nom
+-    rotation = _rotation_angle_deg(E[:3, :3])
+-    translation = float(np.linalg.norm(E[:3, 3]))
+-    if rotation < MIN_ROTATION_DEG:
+-        reason = "within noise"
+-    elif rotation > MAX_ROTATION_DEG or translation > MAX_TRANSLATION_M:
+-        reason = "implausibly large"
+-    elif score < MIN_OVERLAP or score <= corr0:
+-        reason = "objects do not overlap better than nominal"
+-    elif rms is None or rms > MAX_ICP_RMS_M:
+-        reason = "ICP residual too large"
+-    else:
+-        return WristCorrection(camera, E, True, "applied", rotation, translation, info)
+-    return WristCorrection(camera, identity, False, reason, rotation, translation, info)
+-
+-
+-def calibrate_wrists(
+-    request: Any, station: Any, camera_fk: Any, *, table_z_hint: float = 0.731
+-) -> dict[str, WristCorrection]:
+-    """Per wrist camera of ``request`` (needs head and wrist depth): its correction, applied or not."""
+-    out: dict[str, WristCorrection] = {}
+-    if request.depths.get("head") is None:
+-        return out
+-    head_cfg = station.cameras["head"]
+-    head_pose = np.asarray(camera_fk("head", request), dtype=np.float64)
+-    Ph = _apply(
+-        head_pose,
+-        back_project(
+-            request.depths["head"],
+-            np.asarray(head_cfg.color_K),
+-            getattr(head_cfg, "distortion", None),
+-            HEAD_STEP,
+-            0.1,
+-            2.5,
+-        ),
+-    )
+-    for camera in ("hand_left", "hand_right"):
+-        if request.depths.get(camera) is None:
+-            continue
+-        cfg = station.cameras[camera]
+-        try:
+-            points = back_project(
+-                request.depths[camera],
+-                np.asarray(cfg.color_K),
+-                getattr(cfg, "distortion", None),
+-                DEPTH_STEP,
+-                SELF_VIEW_M,
+-                FAR_M,
+-            )
+-            pose = np.asarray(camera_fk(camera, request), dtype=np.float64)
+-            out[camera] = estimate_wrist_correction(
+-                camera=camera,
+-                head_points_base=Ph,
+-                wrist_points_optical=points,
+-                wrist_pose=pose,
+-                table_z_hint=table_z_hint,
+-            )
+-        except Exception as exc:  # never let the self-check break an episode
+-            out[camera] = WristCorrection(camera, np.eye(4), False, "error: " + str(exc)[:80])
+-    return out
+-
+-
+-__all__ = [
+-    "MAX_ROTATION_DEG",
+-    "MAX_TRANSLATION_M",
+-    "MIN_ROTATION_DEG",
+-    "WristCorrection",
+-    "back_project",
+-    "calibrate_wrists",
+-    "estimate_wrist_correction",
+-    "fit_table_plane",
+-]
+diff --git a/src/cap_harness/providers/curobo/client.py b/src/cap_harness/providers/curobo/client.py
+--- a/src/cap_harness/providers/curobo/client.py
++++ b/src/cap_harness/providers/curobo/client.py
+@@ -1,4 +1,3 @@
+-# Modified by FF EAI Robotics Ecosystem Inc. (2026).
+ """Typed HTTP client for isolated cuRobo IK and motion generation."""
+ 
+ from __future__ import annotations
+@@ -404,8 +403,6 @@
+             "base_transforms": {arm: context.base_transforms[arm].tolist() for arm in state.arms},
+             "end_effector_links": dict(context.end_effector_links),
+         }
+-        if context.lock_joints is not None:
+-            payload["lock_joints"] = dict(context.lock_joints)
+         if scene is not None:
+             if scene.frame != state.base_frame:
+                 raise ValueError("planning scene and robot state frames do not match")
+diff --git a/src/cap_harness/providers/curobo/service.py b/src/cap_harness/providers/curobo/service.py
+--- a/src/cap_harness/providers/curobo/service.py
++++ b/src/cap_harness/providers/curobo/service.py
+@@ -11,7 +11,6 @@
+ import os
+ from pathlib import Path
+ import tempfile
+-import threading
+ from typing import Any, Literal
+ 
+ from fastapi import FastAPI, HTTPException
+@@ -32,7 +31,6 @@
+ install_service_runtime(app)
+ _PLANNERS: dict[tuple[str, float | None, float | None], Any] = {}
+ _IK_SOLVERS: dict[str, Any] = {}
+-_BUILD_LOCK = threading.Lock()
+ _SEGMENTATION_KINEMATICS: dict[str, Any] = {}
+ _SEGMENTATION_TOLERANCE_M = 0.02
+ _LOGGER = logging.getLogger(__name__)
+@@ -77,8 +75,6 @@
+     voxel_size_m: float = 0.01
+     interpolation_dt_s: float | None = None
+     maximum_trajectory_dt_s: float | None = None
+-    lock_joints: dict[str, float] | None = None
+-    """g2 only: values for locked (non-arm) joints, over the service's configured locks; one planner per lock map."""
+ 
+ 
+ class IkRequest(BaseRequest):
+@@ -199,7 +195,7 @@
+     return output.name
+ 
+ 
+-@functools.lru_cache(maxsize=64)
++@functools.lru_cache(maxsize=4)
+ def _g2_robot_config(lock_key: tuple[tuple[str, float], ...] = ()) -> str:
+     """CuRobo description of the AgiBot G2 (both arms, waist/head/fingers locked).
+ 
+@@ -224,27 +220,11 @@
+     return curobo_config.write_g2_curobo_config(source, urdf, lock_joints=locks)
+ 
+ 
+-def _g2_lock_key(overrides: dict[str, float] | None = None) -> tuple[tuple[str, float], ...]:
+-    """The hashable lock map the g2 planner is keyed on: the service's locks, overridden per request.
+-
+-    A request's ``lock_joints`` (the live waist / the task's head pose, C5m) may only name joints the service
+-    already locks, so the free joints stay the 14 arm joints. Values are rounded to 1e-4 rad for the key.
+-    """
++def _g2_lock_key() -> tuple[tuple[str, float], ...]:
++    """The hashable lock map the g2 planner is keyed on."""
+     from cap_harness.g2 import curobo_config
+ 
+-    locks = curobo_config.lock_joints_from_env()
+-    if overrides:
+-        unknown = sorted(set(overrides) - set(locks))
+-        if unknown:
+-            raise HTTPException(
+-                status_code=400, detail=f"lock_joints names joints the g2 model does not lock: {unknown}"
+-            )
+-        for name, value in overrides.items():
+-            value = float(value)
+-            if not np.isfinite(value):
+-                raise HTTPException(status_code=400, detail=f"lock_joints[{name!r}] must be finite")
+-            locks[name] = value
+-    return tuple(sorted((name, round(float(value), 4)) for name, value in locks.items()))
++    return tuple(sorted(curobo_config.lock_joints_from_env().items()))
+ 
+ 
+ def _joint_dimension(model: str) -> int:
+@@ -329,7 +309,7 @@
+     if request.model == "yam_real":
+         return _yam_real_robot_config()
+     if request.model == "g2":
+-        return _g2_robot_config(_g2_lock_key(request.lock_joints))
++        return _g2_robot_config(_g2_lock_key())
+     value = os.environ.get("CAP_HARNESS_CUROBO_DUAL_CONFIG")
+     if value and Path(value).is_file():
+         return value
+@@ -607,28 +587,24 @@
+     planner = _PLANNERS.get(key)
+     try:
+         if planner is None:
+-            # One construction at a time: queues that first ask for a new lock map together must not each build it.
+-            with _BUILD_LOCK:
+-                planner = _PLANNERS.get(key)
+-                if planner is None:
+-                    from curobo.motion_planner import MotionPlanner, MotionPlannerCfg
+-
+-                    config = MotionPlannerCfg.create(
+-                        robot=robot,
+-                        scene_model=None,
+-                        collision_cache={"mesh": 1},
+-                        # Kept on. If a specific pair ever turns out to be a false
+-                        # positive, name it in ``self_collision_ignore`` in the robot
+-                        # config rather than disabling the whole term.
+-                        self_collision_check=not _collision_disabled(request.model),
+-                    )
+-                    if interpolation_dt is not None:
+-                        config.trajopt_solver_config.interpolation_dt = float(interpolation_dt)
+-                    if maximum_dt is not None:
+-                        config.trajopt_solver_config.maximum_trajectory_dt = float(maximum_dt)
+-                    planner = MotionPlanner(config)
+-                    planner.warmup(enable_graph=True, num_warmup_iterations=2)
+-                    _PLANNERS[key] = planner
++            from curobo.motion_planner import MotionPlanner, MotionPlannerCfg
++
++            config = MotionPlannerCfg.create(
++                robot=robot,
++                scene_model=None,
++                collision_cache={"mesh": 1},
++                # Kept on. If a specific pair ever turns out to be a false
++                # positive, name it in ``self_collision_ignore`` in the robot
++                # config rather than disabling the whole term.
++                self_collision_check=not _collision_disabled(request.model),
++            )
++            if interpolation_dt is not None:
++                config.trajopt_solver_config.interpolation_dt = float(interpolation_dt)
++            if maximum_dt is not None:
++                config.trajopt_solver_config.maximum_trajectory_dt = float(maximum_dt)
++            planner = MotionPlanner(config)
++            planner.warmup(enable_graph=True, num_warmup_iterations=2)
++            _PLANNERS[key] = planner
+         scene = _scene(request, planner)
+         if scene is not None:
+             _purge_scene_mesh_cache(planner)
+@@ -645,24 +621,21 @@
+     solver = _IK_SOLVERS.get(robot)
+     try:
+         if solver is None:
+-            with _BUILD_LOCK:
+-                solver = _IK_SOLVERS.get(robot)
+-                if solver is None:
+-                    from curobo.inverse_kinematics import InverseKinematics, InverseKinematicsCfg
+-
+-                    config = InverseKinematicsCfg.create(
+-                        robot=robot,
+-                        scene_model=None,
+-                        collision_cache={"mesh": 1},
+-                        num_seeds=32,
+-                        # Kept in step with the planner above. If IK screened
+-                        # self-collision while planning did not, IK would reject seeds
+-                        # the planner is willing to use and the two would disagree about
+-                        # the same pose.
+-                        self_collision_check=not _collision_disabled(request.model),
+-                    )
+-                    solver = InverseKinematics(config)
+-                    _IK_SOLVERS[robot] = solver
++            from curobo.inverse_kinematics import InverseKinematics, InverseKinematicsCfg
++
++            config = InverseKinematicsCfg.create(
++                robot=robot,
++                scene_model=None,
++                collision_cache={"mesh": 1},
++                num_seeds=32,
++                # Kept in step with the planner above. If IK screened
++                # self-collision while planning did not, IK would reject seeds
++                # the planner is willing to use and the two would disagree about
++                # the same pose.
++                self_collision_check=not _collision_disabled(request.model),
++            )
++            solver = InverseKinematics(config)
++            _IK_SOLVERS[robot] = solver
+         scene = _scene(request, solver)
+         if scene is not None:
+             # Same name-keyed mesh cache as the planner above, and _IK_SOLVERS
+diff --git a/src/cap_harness/registry.py b/src/cap_harness/registry.py
+--- a/src/cap_harness/registry.py
++++ b/src/cap_harness/registry.py
+@@ -77,16 +77,9 @@
+ )
+ 
+ G2_PUBLIC_TOOL_NAMES = frozenset(
+-    {
+-        "g2.get_task_metadata",
+-        "g2.get_controller_metadata",
+-        "g2.resolve_instruction",
+-        "g2.move_torso",
+-        "g2.get_body_state",
+-    }
+-)
+-"""Nonprivileged AgiBot G2 (GenieSim / GDK) metadata, instruction-resolution, waist-command and body-geometry
+-extensions (the last two for the manipulation board: sorting turns the waist; reach comes from FK)."""
++    {"g2.get_task_metadata", "g2.get_controller_metadata", "g2.resolve_instruction"}
++)
++"""Nonprivileged AgiBot G2 (GenieSim / GDK) metadata and instruction-resolution extensions."""
+ 
+ _APPROVED_EMBODIMENT_PREFIXES = (
+     "behavior.",

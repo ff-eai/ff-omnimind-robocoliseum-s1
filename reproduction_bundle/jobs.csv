@@ -1,0 +1,7 @@
+track,job,program_version,program_md5_prefix,harness_commit,completed,score,rank,rows,rank_snapshot_pt
+Instruction Following,1688,v3.6,f937a2ae,689546a,2026-10-29,0.95163,4,55,2026-10-29 20:34
+Instruction Following,1699,v3.8,bfccdf95,4a9c8c5,2026-10-30,0.97700,2,55,2026-10-30 15:27
+Instruction Following,1701,v3.9,504ba720,4a9c8c5,2026-10-31,0.98613,2,55,2026-10-31 13:01
+Robustness,1702,v4.0,31db9182,9ae2dd6,2026-10-31,0.95782,1,34,2026-10-31 22:27
+Spatial Reasoning,1710,v2,d56ba517,c583d6f,2026-11-02,0.92081,3,36,2026-11-02 21:26
+General Manipulation,1718,v1,fcde3870,c33b239,2026-11-03,0.61449,6,38,2026-11-03 14:27

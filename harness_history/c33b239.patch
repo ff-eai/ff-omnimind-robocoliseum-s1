@@ -1,0 +1,82 @@
+diff --git a/src/cap_harness/g2/adapter.py b/src/cap_harness/g2/adapter.py
+--- a/src/cap_harness/g2/adapter.py
++++ b/src/cap_harness/g2/adapter.py
+@@ -1422,22 +1422,12 @@
+             },
+         )
+ 
+-    def get_body_state(
+-        self,
+-        waist: Sequence[float] | None = None,
+-        left: Sequence[float] | None = None,
+-        right: Sequence[float] | None = None,
+-    ) -> dict[str, Any]:
++    def get_body_state(self) -> dict[str, Any]:
+         """Torso and arm geometry now, from the robot's own kinematics (joint readings, no scene state).
+ 
+         ``waist`` (reported), ``waist_target`` (commanded this episode, or None), ``head`` (reported, else the
+         task's init head), per arm the base-frame origins of its seven joints (``joint_origins``) with the tool
+         position and approach axis, and the head camera's position and optical axis. Never raises.
+-
+-        g2-v44 (C5n): ``waist`` / ``left`` / ``right`` (optional) evaluate the same FK for those body or arm joints
+-        instead of the reported ones (``hypothetical`` is then True) - e.g. to find a torso move that carries both
+-        held arms without turning them. Per arm ``tool_x_axis`` is reported too, and ``body_origins`` (the five body
+-        links' origins, body joint 1 first). Nothing moves.
+         """
+         kinematics = self._kinematics
+         if kinematics is None:
+@@ -1447,16 +1437,10 @@
+             head = np.asarray(request.head_joints, dtype=np.float64).reshape(-1)
+             if head.size != HEAD_DOF:
+                 head = kinematics.head_hold(request.task_name)
+-            hypothetical = waist is not None or left is not None or right is not None
+-            body = request.waist_joints if waist is None else np.asarray(waist, dtype=np.float64).reshape(WAIST_DOF)
+-            left_joints = request.left_joints if left is None else np.asarray(left, dtype=np.float64).reshape(ARM_DOF)
+-            right_joints = request.right_joints if right is None else np.asarray(right, dtype=np.float64).reshape(ARM_DOF)
+-            if not (np.all(np.isfinite(body)) and np.all(np.isfinite(left_joints)) and np.all(np.isfinite(right_joints))):
+-                return {"ok": False, "error": "non-finite joints"}
+             positions = kinematics.joint_map(
+-                left=left_joints,
+-                right=right_joints,
+-                waist=body,
++                left=request.left_joints,
++                right=request.right_joints,
++                waist=request.waist_joints,
+                 head=head,
+             )
+             arms: dict[str, Any] = {}
+@@ -1471,30 +1455,22 @@
+                     "joint_origins": origins,
+                     "tool_position": tool[:3, 3].tolist(),
+                     "tool_z_axis": tool[:3, 2].tolist(),
+-                    "tool_x_axis": tool[:3, 0].tolist(),
+                 }
+             camera = kinematics.camera_pose(
+                 "head",
+-                left=left_joints,
+-                right=right_joints,
+-                waist=body,
++                left=request.left_joints,
++                right=request.right_joints,
++                waist=request.waist_joints,
+                 head=head,
+             )
+-            body_origins = [
+-                kinematics.link_pose(kinematics.model.joints[name].child, positions)[:3, 3].tolist()
+-                for name in self._station.waist.joint_names
+-            ]
+         except Exception as exc:  # a program-facing tool never raises
+             return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+         return {
+             "ok": True,
+-            "hypothetical": hypothetical,
+-            "waist": np.asarray(body, dtype=np.float64).tolist(),
+-            "waist_reported": np.asarray(request.waist_joints, dtype=np.float64).tolist(),
++            "waist": np.asarray(request.waist_joints, dtype=np.float64).tolist(),
+             "waist_target": None if self._waist_target is None else self._waist_target.tolist(),
+             "head": head.tolist(),
+             "arms": arms,
+-            "body_origins": body_origins,
+             "head_camera": {"position": camera[:3, 3].tolist(), "forward": camera[:3, 2].tolist()},
+         }
+ 

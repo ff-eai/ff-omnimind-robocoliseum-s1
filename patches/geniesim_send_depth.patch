@@ -1,0 +1,166 @@
+GenieSim 3.2 local-evaluation patch: send depth and camera poses to the policy server
+=====================================================================================
+
+Target:  GenieSim (https://github.com/AgibotTech/genie_sim) tag v3.2.0, commit 0e659ad.
+Scope:   four files under source/geniesim_benchmark/src/geniesim_benchmark/.
+Effect:  a new benchmark config flag `benchmark.send_depth` (default false, so the
+         leaderboard payload is byte-for-byte unchanged). When true, the serial
+         CoRobotPolicy payload also carries
+           params.images.head_depth / hand_left_depth / hand_right_depth
+             RAW_UINT16, metres x1000 (head) and x10000 (hands), the encoding the
+             stock client already had commented out (_encode_depth), and
+           params.camera_poses = {"frame": "world", "base_link": 4x4,
+             "head": 4x4, "hand_left": 4x4, "hand_right": 4x4}
+             world poses of the camera prims in the OpenCV optical convention
+             (api_core.get_obj_world_pose_matrix(camera=True) applies the Isaac
+             Rx(180)) plus base_link, so the server can re-express them.
+         The vectorized path (enable_vec) builds its obs without depth and is not
+         covered. ASPIRE's codec decodes both fields (cap_harness/g2/codec.py).
+
+Enable:  python ... --benchmark.send_depth true    (or send_depth: true under
+         benchmark: in config.yaml)
+
+Apply:   cd <genie_sim checkout at v3.2.0>
+         git apply --check <this repository>/patches/geniesim_send_depth.patch
+         git apply         <this repository>/patches/geniesim_send_depth.patch
+Revert:  git apply -R      <this repository>/patches/geniesim_send_depth.patch
+
+Leading text before the first `diff --git` is ignored by git apply.
+
+diff --git a/source/geniesim_benchmark/src/geniesim_benchmark/benchmark/envs/pi_env.py b/source/geniesim_benchmark/src/geniesim_benchmark/benchmark/envs/pi_env.py
+index c254221..e6cc8eb 100755
+--- a/source/geniesim_benchmark/src/geniesim_benchmark/benchmark/envs/pi_env.py
++++ b/source/geniesim_benchmark/src/geniesim_benchmark/benchmark/envs/pi_env.py
+@@ -55,9 +55,37 @@ class PiEnv(DummyEnv):
+         self.cur_arm = states["left_arm"] + states["right_arm"]
+ 
+         obs = {"images": images, "states": states, "depth": None}
++        if getattr(self, "send_depth", False) and fetch_images:
++            # Local eval only (benchmark.send_depth): the bundle already fetched
++            # depth alongside the images; pass it through with the camera poses.
++            obs["depth"] = bundle.get("depth")
++            obs["camera_poses"] = self._camera_world_poses()
+         obs["eef"] = self.ikfk_solver.compute_eef(self.cur_arm)
+         return obs
+ 
++    def _camera_world_poses(self):
++        """World poses (4x4 lists) of the payload cameras in the OpenCV optical
++        convention (api_core applies the Isaac camera Rx(180)), plus base_link so
++        the server can re-express them in the robot frame."""
++        poses = {"frame": "world"}
++        api = self.api_core
++        try:
++            poses["base_link"] = api.get_obj_world_pose_matrix(f"{api.robot_prim_path}/base_link").tolist()
++        except Exception as e:
++            logger.warning(f"base_link pose unavailable: {e}")
++        payload_names = {"head": "head", "left_hand": "hand_left", "right_hand": "hand_right"}
++        cam_dirs = self.data_courier._camera_dirs()
++        for prim in getattr(api.robot_cfg, "cam_prim_path", []):
++            cam_id = prim.split("/")[-1].lower()
++            for obs_name, payload_name in payload_names.items():
++                if cam_dirs.get(obs_name) != cam_id:
++                    continue
++                try:
++                    poses[payload_name] = api.get_obj_world_pose_matrix(prim, camera=True).tolist()
++                except Exception as e:
++                    logger.warning(f"camera pose unavailable for {prim}: {e}")
++        return poses
++
+     def reset(self):
+         self._followed_objects = set()
+         self._picked_objects = set()
+diff --git a/source/geniesim_benchmark/src/geniesim_benchmark/benchmark/policy/corobotpolicy.py b/source/geniesim_benchmark/src/geniesim_benchmark/benchmark/policy/corobotpolicy.py
+index 86c09b4..83f8b7c 100644
+--- a/source/geniesim_benchmark/src/geniesim_benchmark/benchmark/policy/corobotpolicy.py
++++ b/source/geniesim_benchmark/src/geniesim_benchmark/benchmark/policy/corobotpolicy.py
+@@ -43,8 +43,11 @@ class CoRobotPolicy(BasePolicy):
+         debug=False,
+         preview=False,
+         robot_cfg="",
++        send_depth=False,
+     ):
+         super().__init__(task_name=task_name, sub_task_name=sub_task_name)
++        # Local eval only (benchmark.send_depth): attach depth + camera poses.
++        self._send_depth = bool(send_depth)
+         self.ts_str = time.strftime("%Y%m%d_%H%M", time.localtime(time.time()))
+         self.initialized = False
+         self.preview = preview
+@@ -144,6 +147,24 @@ class CoRobotPolicy(BasePolicy):
+             "width": image_rgb.shape[1],
+         }
+ 
++    # Payload depth key and uint16 scale per obs camera (see _encode_depth).
++    _DEPTH_FIELDS = (
++        ("head", "head_depth", 1000),
++        ("left_hand", "hand_left_depth", 10000),
++        ("right_hand", "hand_right_depth", 10000),
++    )
++
++    def _attach_depth(self, params, obs):
++        """Local eval only: depth maps the env fetched with the images, and the
++        camera / base_link world poses when the env provided them."""
++        depth = obs.get("depth") or {}
++        for cam, key, scale in self._DEPTH_FIELDS:
++            if depth.get(cam) is not None:
++                params["images"][key] = self._encode_depth(np.asarray(depth[cam], dtype=np.float32), scale)
++        camera_poses = obs.get("camera_poses")
++        if camera_poses:
++            params["camera_poses"] = camera_poses
++
+     @staticmethod
+     def _encode_depth(depth_map: np.ndarray, scale: int) -> dict:
+         depth = np.nan_to_num(depth_map, nan=0.0, posinf=0.0, neginf=0.0)
+@@ -268,6 +289,8 @@ class CoRobotPolicy(BasePolicy):
+                 "task_progress": self._extract_scores(self._task_progress),
+             },
+         }
++        if self._send_depth:
++            self._attach_depth(payload["params"], obs)
+         if self._hist_frame_interval > 0:
+             # Attach the history captured while replaying the previous chunk.
+             # On the first inference (before the server has enabled history)
+diff --git a/source/geniesim_benchmark/src/geniesim_benchmark/benchmark/task_benchmark.py b/source/geniesim_benchmark/src/geniesim_benchmark/benchmark/task_benchmark.py
+index ff484ea..657df85 100755
+--- a/source/geniesim_benchmark/src/geniesim_benchmark/benchmark/task_benchmark.py
++++ b/source/geniesim_benchmark/src/geniesim_benchmark/benchmark/task_benchmark.py
+@@ -377,6 +377,7 @@ class TaskBenchmark(object):
+                 sub_task_name=self.args.sub_task_name,
+                 preview=self.args.preview,
+                 robot_cfg=self.task_config.get("robot_cfg", ""),
++                send_depth=bool(getattr(self.args, "send_depth", False)),
+             )
+         elif self.args.policy_class == "DemoPolicy":
+             self.policy = DemoPolicy(
+@@ -437,6 +438,9 @@ class TaskBenchmark(object):
+             from geniesim_benchmark.benchmark.envs.pi_env import PiEnv
+ 
+             self.env = PiEnv(self.api_core, episode_file, self.task_config)
++            # Local eval only: vectorized envs build obs in _read_obs_direct and
++            # never carry depth, so the flag is threaded to the serial env alone.
++            self.env.send_depth = bool(getattr(self.args, "send_depth", False))
+         elif self.args.env_class == "DummyEnv":
+             from geniesim_benchmark.benchmark.envs.dummy_env import DummyEnv
+ 
+@@ -625,6 +629,7 @@ class TaskBenchmark(object):
+             sub_task_name=sub_task_name,
+             preview=self.args.preview,
+             robot_cfg=self.task_config.get("robot_cfg", ""),
++            send_depth=bool(getattr(self.args, "send_depth", False)),
+         )
+         return policy
+ 
+diff --git a/source/geniesim_benchmark/src/geniesim_benchmark/config/params.py b/source/geniesim_benchmark/src/geniesim_benchmark/config/params.py
+index df479c2..9928131 100644
+--- a/source/geniesim_benchmark/src/geniesim_benchmark/config/params.py
++++ b/source/geniesim_benchmark/src/geniesim_benchmark/config/params.py
+@@ -144,6 +144,10 @@ class BenchmarkConfig:
+     #            passes. Requires the task's instructions.json to define a
+     #            `subtask_steps` list paired with checkers.
+     instruction_mode: str = "full"
++    # Local evaluation only: also send head/hand depth (RAW_UINT16, head x1000,
++    # hands x10000) and the camera / base_link world poses to the inference
++    # server. Leaderboard payloads are unchanged while this is false.
++    send_depth: bool = False
+ 
+ 
+ @dataclass

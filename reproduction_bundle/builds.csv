@@ -1,0 +1,17 @@
+track,version,program_md5_prefix,harness_commit,code_lines,reported_in
+Instruction Following,v3,bd3ea1ff,971554e,1166,aiming error
+Instruction Following,v3.2,69162577,4d42d8f,1372,aiming error
+Instruction Following,v3.4,6988deb5,2c45ad7,1997,paired comparison
+Instruction Following,v3.5,f8e44068,2c45ad7,2365,paired comparison
+Instruction Following,v3.6,f937a2ae,689546a,2594,job 1688
+Instruction Following,v3.7,21f9438a,4a9c8c5,3026,paired comparison
+Instruction Following,v3.8,bfccdf95,4a9c8c5,3393,job 1699; paired comparisons
+Instruction Following,v3.9,504ba720,4a9c8c5,3596,job 1701; paired comparisons; Section 5.1
+Robustness,v4.0,31db9182,9ae2dd6,3852,job 1702
+Robustness,v4.0 (comparison),31db9182,69313ed,3852,paired comparison; Figure 5
+Spatial Reasoning,v1,561a90df,c583d6f,3427,paired comparison
+Spatial Reasoning,v2,d56ba517,c583d6f,3829,job 1710; paired comparisons
+Spatial Reasoning,v3,5a479bbd,c583d6f,4394,paired comparisons
+General Manipulation,v1,fcde3870,c33b239,4835,job 1718; paired comparisons; Section 5.2
+General Manipulation,v2,98996298,7df1039,5643,paired comparisons; Section 5.2
+General Manipulation,v3,f8859684,7df1039,5836,paired comparisons

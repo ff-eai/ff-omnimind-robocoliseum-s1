@@ -1,0 +1,49 @@
+job,track,task,task_id,recount,platform
+1688,Instruction Following,Billiard color,pick_billiards_color,0.98485,0.985
+1688,Instruction Following,Block color,pick_block_color,0.96500,0.965
+1688,Instruction Following,Block number,pick_block_number,0.98131,0.9813
+1688,Instruction Following,Block shape,pick_block_shape,0.97500,0.975
+1688,Instruction Following,Block size,pick_block_size,0.98000,0.98
+1688,Instruction Following,Common sense,pick_common_sense,0.91000,0.91
+1688,Instruction Following,Logical or,pick_follow_logic_or,0.92000,0.92
+1688,Instruction Following,Object type,pick_object_type,0.99000,0.99
+1688,Instruction Following,Specific object,pick_specific_object,0.96000,0.96
+1688,Instruction Following,Straighten,straighten_object,0.84694,0.85
+1699,Instruction Following,Billiard color,pick_billiards_color,0.99500,0.995
+1699,Instruction Following,Block color,pick_block_color,0.99500,0.995
+1699,Instruction Following,Block number,pick_block_number,1.00000,1
+1699,Instruction Following,Block shape,pick_block_shape,0.98000,0.98
+1699,Instruction Following,Block size,pick_block_size,0.98000,0.98
+1699,Instruction Following,Common sense,pick_common_sense,0.99000,0.99
+1699,Instruction Following,Logical or,pick_follow_logic_or,0.99500,0.995
+1699,Instruction Following,Object type,pick_object_type,0.99500,0.995
+1699,Instruction Following,Specific object,pick_specific_object,1.00000,1
+1699,Instruction Following,Straighten,straighten_object,0.84000,0.84
+1701,Instruction Following,Billiard color,pick_billiards_color,0.99000,0.99
+1701,Instruction Following,Block color,pick_block_color,0.99000,0.99
+1701,Instruction Following,Block number,pick_block_number,0.98131,0.9813
+1701,Instruction Following,Block shape,pick_block_shape,0.98000,0.98
+1701,Instruction Following,Block size,pick_block_size,0.98000,0.98
+1701,Instruction Following,Common sense,pick_common_sense,0.99500,0.995
+1701,Instruction Following,Logical or,pick_follow_logic_or,0.99000,0.99
+1701,Instruction Following,Object type,pick_object_type,1.00000,1
+1701,Instruction Following,Specific object,pick_specific_object,0.98500,0.985
+1701,Instruction Following,Straighten,straighten_object,0.97000,0.97
+1710,Spatial Reasoning,Pick by absolute position,pick_object_absolute_position,0.96670,0.9666
+1710,Spatial Reasoning,Pick by relative position,pick_object_relative_position,1.00000,1
+1710,Spatial Reasoning,Swap two beverages,place_beverage_to_anothers_position,0.93330,0.9333
+1710,Spatial Reasoning,Place relative to an object,place_object_relative_position,0.90000,0.9
+1710,Spatial Reasoning,Sort cubes by size,sort_cubes_by_size,0.80000,0.8
+1710,Spatial Reasoning,Sort by number,sort_number,0.90000,0.9
+1710,Spatial Reasoning,Stack bowls,stack_bowls,0.96670,0.9666
+1710,Spatial Reasoning,Stack three blocks,stack_three_building_blocks,0.90000,0.9
+1718,General Manipulation,Hold pot with both hands,bimanual_hold_pot,0.36670,0.3666
+1718,General Manipulation,Clean desktop,clean_the_desktop,0.00000,0
+1718,General Manipulation,Open door,open_door,0.95000,0.95
+1718,General Manipulation,Place block into box,place_block_into_box,0.85000,0.85
+1718,General Manipulation,Pour work pieces,pour_workpiece,0.95000,0.95
+1718,General Manipulation,Scoop popcorn,scoop_popcorn,0.75000,0.75
+1718,General Manipulation,Sort packages,sorting_packages,0.73330,0.7333
+1718,General Manipulation,"Sort packages, continuous",sorting_packages_continuous,0.22500,0.225
+1718,General Manipulation,Stock and straighten shelf,stock_and_straighten_shelf,0.32000,0.32
+1718,General Manipulation,Take wrong item off the shelf,take_wrong_item_shelf,1.00000,1

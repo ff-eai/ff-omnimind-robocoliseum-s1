@@ -1,0 +1,212 @@
+# Copyright (c) 2026 FF EAI Robotics Ecosystem Inc. All rights reserved. See LICENSE-FF.txt.
+# AgiBot G2 as GenieSim 3.2 simulates it: the G2_omnipicker asset
+# (robot/G2_omnipicker/robot_fix.usda) that 21 of the 27 benchmark tasks load.
+#
+# Provenance of every number, so it is clear what is verified and what is not:
+#   [USD]  read from the simulated asset's joint frames / camera prims with
+#          usd-core on 2026-10-21 (tests/data/g2_geniesim_usd_links.json);
+#          FK on description/geniesim/G2_omnipicker_sim.urdf reproduces the
+#          asset's own link poses to < 0.01 mm (tests/test_g2_kinematics.py).
+#   [ROBOT] read read-only from the real G2 (the robot's configuration as read
+#          on 2026-09-18); the simulated robot is the
+#          non-crsB arm and differs from the real one where noted.
+#   [ASSUMED] not measured on either side.
+schema_version: 1
+station: geniesim-default
+backend: geniesim
+base_frame: base_link
+default_arm: right
+arm_aliases:
+  primary: right
+  secondary: left
+
+arms:
+  left:
+    # cuRobo / URDF names (G2_omnipicker_fixed_dual.yml cspace order).
+    joint_names:
+      - idx21_arm_l_joint1
+      - idx22_arm_l_joint2
+      - idx23_arm_l_joint3
+      - idx24_arm_l_joint4
+      - idx25_arm_l_joint5
+      - idx26_arm_l_joint6
+      - idx27_arm_l_joint7
+    # [ROBOT] initial_pose.json left_arm_standard; GenieSim tasks start from
+    # their own per-task init_arm, which reset() does not override.
+    home_joints: [1.5707963267948966, -1.5707963267948966, -1.5707963267948966, -1.5707963267948966, 0.0, 0.0, 0.0]
+    ready_joints: [1.5707963267948966, -1.5707963267948966, -1.5707963267948966, -1.5707963267948966, 0.0, 0.0, 0.0]
+    # [ROBOT] identified URDF j1..j7 limits; the sim URDF carries the same values.
+    limits:
+      lower: [-3.072, -2.060, -3.072, -2.496, -3.072, -1.012, -1.536]
+      upper: [3.072, 2.060, 3.072, 1.012, 3.072, 1.012, 1.536]
+    tool_frame: gripper_l_center_link
+    end_link: arm_l_end_link
+    # [USD] end_link -> gripper_l_center_link along end_link z: 0.00537 (ee joint)
+    # + 0.14308 (centre joint). The real omnipicker is 0.14308 straight from
+    # end_link (gdk-real profile). end_link itself is 0.088 m from link7 in the
+    # sim (0.09 on the real robot).
+    tool_offset_m: 0.14845
+  right:
+    joint_names:
+      - idx61_arm_r_joint1
+      - idx62_arm_r_joint2
+      - idx63_arm_r_joint3
+      - idx64_arm_r_joint4
+      - idx65_arm_r_joint5
+      - idx66_arm_r_joint6
+      - idx67_arm_r_joint7
+    # [ROBOT] initial_pose.json right_arm_standard.
+    home_joints: [-1.5707963267948966, -1.5707963267948966, 1.5707963267948966, -1.5707963267948966, 0.0, 0.0, 0.0]
+    ready_joints: [-1.5707963267948966, -1.5707963267948966, 1.5707963267948966, -1.5707963267948966, 0.0, 0.0, 0.0]
+    limits:
+      lower: [-3.072, -2.060, -3.072, -2.496, -3.072, -1.012, -1.536]
+      upper: [3.072, 2.060, 3.072, 1.012, 3.072, 1.012, 1.536]
+    tool_frame: gripper_r_center_link
+    end_link: arm_r_end_link
+    tool_offset_m: 0.14845
+
+waist:
+  joint_names: [idx01_body_joint1, idx02_body_joint2, idx03_body_joint3, idx04_body_joint4, idx05_body_joint5]
+  # [ROBOT] initial_pose.json waist_standard. Phase 0 keeps the waist at the
+  # task's initial pose; this is also the pose the cuRobo g2 model locks the
+  # waist at unless CAP_HARNESS_CUROBO_G2_LOCK_JOINTS overrides it. GenieSim's
+  # G2_omnipicker tasks use body_state [-0.834, 1.217, 0.100, 0, 0].
+  hold: [-0.6981317007977318, 1.5707963267948966, -0.8726646259971648, 0.0, 0.0]
+  limits:
+    lower: [-1.082, 0.0, -1.907, -0.436, -3.046]
+    upper: [0.0, 2.653, 1.039, 0.436, 3.046]
+
+head:
+  joint_names: [idx11_head_joint1, idx12_head_joint2, idx13_head_joint3]
+  hold: [0.0, 0.0, 0.0]
+  limits:
+    lower: [-1.571, -0.349, -0.524]
+    upper: [1.571, 0.349, 0.524]
+
+gripper:
+  # Normalized contract: 0 closed, 1 open.
+  closed: 0.0
+  open: 1.0
+  # Omnipicker joint range [-0.785, 0]; -0.785 is fully open.
+  raw_open: -0.785
+  raw_closed: 0.0
+  # The wire carries the dataset / real-robot convention directly: -0.785 is
+  # fully open, 0 is closed, for both gripper_states and the effector reply.
+  # GenieSim's gripper_scale = -1 (label_state_crsb / process_gripper_action_crsb)
+  # only converts between that and its internal sim joint (+0.785 open); it is
+  # invisible to the policy. Measured 2026-10-21: commanding -0.785 reads
+  # back -0.785 (open), commanding 0.0 reads back 0.0 (closed).
+  wire_scale: 1.0
+  # Ticks a set_gripper command is held for before the next observation is read
+  # (full_travel_s x control_frequency_hz).
+  full_travel_s: 0.4  # local copy: 12 rows per gripper command instead of 30; the episode budget is ~180 rows
+  stall_delta: 0.01
+  stall_steps: 5
+
+# [ASSUMED] base_link-frame box bounding both arms' reach. Refine once the
+# planning scene is built from real FK.
+planning_workspace:
+  lower: [-0.6, -1.0, -0.2]
+  upper: [1.4, 1.0, 2.0]
+
+model:
+  # Paths are relative to cap_harness/g2/description unless absolute.
+  # [USD] sim-matched URDF generated from the asset; what both the adapter's FK
+  # and the cuRobo "g2" model run on, so EE poses, camera poses and plans share
+  # one kinematic model that is the simulated one.
+  urdf: geniesim/G2_omnipicker_sim.urdf
+  fk_urdf: geniesim/G2_omnipicker_sim.urdf
+  # GenieSim's v1 cuRobo description (34 cspace joints, collision spheres,
+  # lock_joints); converted to v2 by providers/curobo/service.py.
+  curobo_yml: geniesim/G2_omnipicker_fixed_dual.yml
+  mjcf: null
+
+controller:
+  # GenieSim tick rate (cfg.app.physics_step / rendering_step at 30 fps); GDK
+  # trajectory samples are interpreted at the same rate.
+  control_frequency_hz: 30.0
+  servo_hz: 100.0
+  ee_pose_hz: 50.0
+  settle_s: 0.5
+  final_joint_tolerance_rad: 0.20  # local copy: the sim arm lags cuRobo's time-optimal end by ~0.13 rad (run 4), the program checks residuals itself
+  max_tracking_error_rad: 0.5
+  homing_joint_speed_rad_s: 0.5
+  min_homing_s: 1.0
+  max_homing_s: 8.0
+
+# Camera mounts. camera_pose = FK(parent_link) @ T_parent_from_camera
+# @ optical_correction(frame_convention). frame_convention is the flag that
+# says what T_parent_from_camera's own axes are:
+#   opengl  -- an Isaac camera prim (+X right, +Y up, -Z forward); the
+#              correction is diag(1,-1,-1,1), the same Rx(180) GenieSim applies
+#              in api_core.get_obj_world_pose_matrix(camera=True).
+#   optical -- already OpenCV (+X right, +Y down, +Z forward), identity.
+# Checked: the sim mounts below, flipped, land within 7 mm / 1 deg of the real
+# robot's calibrated hand-camera extrinsics and 19 mm / 2 deg of its head one.
+cameras:
+  head:
+    resolution: [640, 400]
+    # [USD] head_front_Camera opencvPinhole fx/fy/cx/cy; the real head_color is
+    # fx 305.1 fy 305.0 cx 318.1 cy 199.9.
+    color_K: [[306.6911, 0.0, 319.90094], [0.0, 306.55075, 201.29141], [0.0, 0.0, 1.0]]
+    # The simulated depth is distance_to_image_plane rendered by the same prim,
+    # so it is registered to colour (unlike the real head_depth).
+    depth_K: [[306.6911, 0.0, 319.90094], [0.0, 306.55075, 201.29141], [0.0, 0.0, 1.0]]
+    T_color_from_depth: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]
+    depth_scale: 1000.0
+    # [USD] /genie/head_link3/head_front_Camera xformOp translate + orient.
+    parent_link: head_link3
+    T_parent_from_camera:
+      xyz: [0.10237, 0.02375, 0.10256]
+      quat_wxyz: [0.5945104121873723, 0.3868316461705512, -0.3787291472834019, -0.5945442627086477]
+    frame_convention: opengl
+  hand_left:
+    resolution: [1280, 1056]
+    # [USD] Left_Camera opencvPinhole (real hand_left_color: fx 485.9).
+    color_K: [[486.13733, 0.0, 614.31964], [0.0, 485.94153, 529.99976], [0.0, 0.0, 1.0]]
+    depth_K: [[486.13733, 0.0, 614.31964], [0.0, 485.94153, 529.99976], [0.0, 0.0, 1.0]]
+    T_color_from_depth: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]
+    depth_scale: 10000.0
+    # [USD] /genie/gripper_l_base_link/Left_Camera.
+    parent_link: gripper_l_base_link
+    T_parent_from_camera:
+      xyz: [-0.08979655916171847, -0.0011588271391879679, 0.06070713906090863]
+      quat_wxyz: [0.256282394630355, 0.6590290844890921, -0.6590290844890923, -0.25628239463035496]
+    frame_convention: opengl
+  hand_right:
+    resolution: [1280, 1056]
+    # [USD] Right_Camera opencvPinhole (real hand_right_color: fx 485.3).
+    color_K: [[465.1793, 0.0, 630.648], [0.0, 465.0162, 527.8828], [0.0, 0.0, 1.0]]
+    depth_K: [[465.1793, 0.0, 630.648], [0.0, 465.0162, 527.8828], [0.0, 0.0, 1.0]]
+    T_color_from_depth: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]
+    depth_scale: 10000.0
+    # [USD] /genie/gripper_r_base_link/Right_Camera.
+    parent_link: gripper_r_base_link
+    T_parent_from_camera:
+      xyz: [0.0898, 0.00116, 0.06070713906090863]
+      quat_wxyz: [-0.25628239463035507, -0.6590290844890921, -0.6590290844890923, -0.256282394630355]
+    frame_convention: opengl
+
+geniesim:
+  # The benchmark client connects to --infer-host=<ip>:8999.
+  ws_host: 0.0.0.0
+  ws_port: 8997  # local copy: 8999 is taken by the pi0.5 server on this host
+  # Rows per execute_trajectory reply; one row = one simulator tick.
+  chunk_len: 30
+  # Must stay under the client's per-call limit (120 s leaderboard, 180 s local).
+  reply_timeout_s: 100.0
+  # With patches/geniesim_send_depth.patch applied and --benchmark.send_depth
+  # true, the client also sends head/hand depth and its own camera poses; the
+  # codec prefers those poses over FK when present.
+  request_depth: false
+  pad_last_chunk: true
+  keepalive_hold: false  # local eval: block GenieSim while the program thinks (its inference timeout is 180 s); holds would burn the 200-step budget
+  reset_timeout_s: 600.0
+  step_timeout_s: 300.0
+  include_waist: false
+
+gdk:
+  # GDK deployment: the robot's corobot is the client of a PolicyServer we host.
+  ws_host: 0.0.0.0
+  ws_port: 8000
+  robot_host: 192.0.2.1  # placeholder (documentation address); the robot's address is not part of this release

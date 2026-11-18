@@ -1,0 +1,23 @@
+# cuRobo service, Python 3.12.3, one CUDA GPU; versions of the runs (same environment as the SAM 3 service)
+# plus cuRobo: https://github.com/NVlabs/curobo at a35a708ecfbb26eb9ab2d7ef22c65919c4fae4a9 (pip install -e . --no-deps)
+# warp-lang 1.18.0+cu12 is the CUDA 12 wheel of NVIDIA's warp GitHub release (the PyPI wheel targets CUDA 13)
+torch==2.13.0+cu129
+warp-lang==1.18.0+cu12
+nvidia-cuda-runtime-cu12==12.9.79
+numpy==1.26.4
+scipy==1.13.1
+trimesh==5.1.1
+yourdfpy==0.0.60
+numpy-quaternion==2024.0.13
+matplotlib==3.11.2
+importlib_resources==7.1.0
+setuptools_scm==10.3.4
+fastapi==0.136.3
+uvicorn==0.54.0
+pydantic==2.14.1
+msgpack==1.2.3
+websockets==17.3
+PyYAML==6.0.3
+requests==2.34.2
+opencv-python-headless==5.0.0.93
+Pillow==13.0.0

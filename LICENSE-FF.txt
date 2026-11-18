@@ -1,0 +1,22 @@
+License for the files of FF EAI Robotics Ecosystem Inc.
+
+Copyright (c) 2026 FF EAI Robotics Ecosystem Inc. All rights reserved.
+
+1. Files covered. This license covers the files of this repository written by FF EAI Robotics Ecosystem Inc.
+   ("FF"): everything under programs/, harness_history/, patches/ and reproduction_bundle/; README.md and the
+   requirements files; the files under src/ that carry FF's copyright line; and FF's changes to the files marked
+   "Modified by FF EAI Robotics Ecosystem Inc.". It does not cover the ASPIRE files of NVIDIA, which are under the
+   Apache License 2.0 (LICENSE, NOTICE), or the files and code of GenieSim, which are under the Mozilla Public
+   License 2.0: src/cap_harness/g2/description/geniesim/, and the GenieSim code that
+   patches/geniesim_send_depth.patch quotes and changes.
+
+2. Permission. You may read the covered files. You may run them, as provided or changed as harness_history/
+   describes, only to reproduce the results of the technical report
+   "Write Once, Run with Zero Cloud Tokens: Code-as-Policy Skills Discovered in Simulation by a Coding Agent".
+
+3. Other use. Any other use requires FF's prior written permission. In particular, you may not use the covered
+   files or any part of them for commercial purposes, redistribute or publish them, or use them to develop, train
+   or evaluate any other system.
+
+4. No warranty. The covered files are provided "as is", without warranty of any kind, express or implied. In no
+   event shall FF be liable for any claim, damages or other liability arising from the files or their use.
