@@ -1,0 +1,42 @@
+name: "Call Build and Release"
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Tag to build and release (format: v<MAJOR>.<MINOR>.<PATCH>). With build_only: any branch, tag or SHA (e.g. main)"
+        required: true
+        type: string
+      build_only:
+        description: "只构建不发布：tag_name 可填任意分支/SHA，跳过 tag 与 release 分支校验、install-test、Nexus 上传和 GitHub Release；deb 仅作为 run artifact 保留"
+        required: false
+        type: boolean
+        default: false
+      skip_install_test:
+        description: "跳过 install-test（安装验证失败后由 SCM/R&D 人工重跑时置 true）"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  actions: read
+  contents: write
+  packages: read    # pull GHCR build image (no-op for non-container repos)
+
+jobs:
+  call-build-release:
+    uses: ff-eai/.github/.github/workflows/build-release-reusable.yml@main
+    with:
+      tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref_name }}
+      # 仅手动触发可置 true；tag push 永远是正式发布
+      build_only: ${{ github.event_name == 'workflow_dispatch' && inputs.build_only || false }}
+      skip_install_test: ${{ github.event_name == 'workflow_dispatch' && inputs.skip_install_test || (vars.SKIP_INSTALL_TEST == 'true') }}
+    secrets:
+      GH_TOKEN: ${{ secrets.GH_TOKEN }}
+      NEXUS_USER: ${{ secrets.NEXUS_USER }}
+      NEXUS_PASS: ${{ secrets.NEXUS_PASS }}
+      NEXUS_PUB_USER: ${{ secrets.NEXUS_PUB_USER }}
+      NEXUS_PUB_PASS: ${{ secrets.NEXUS_PUB_PASS }}
