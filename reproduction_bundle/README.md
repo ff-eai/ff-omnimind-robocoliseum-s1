@@ -1,4 +1,4 @@
-# Reproduction bundle: FF Omnimind technical report
+# Reproduction bundle: FF OmniMind technical report
 
 This bundle accompanies the technical report *Write Once, Run with Zero Cloud Tokens: Code-as-Policy Skills Discovered
 in Simulation by a Coding Agent*. It lists the frozen programs, harness commits and RoboColiseum jobs behind every
@@ -40,7 +40,7 @@ Appendix C; `aiming error`, Table 3 row 1 and Appendix E).
 
 ## Jobs
 
-`jobs.csv` lists the RoboColiseum jobs of FF Omnimind up to the leaderboard snapshot of 2026-11-03 14:30 PST, the
+`jobs.csv` lists the RoboColiseum jobs of FF OmniMind up to the leaderboard snapshot of 2026-11-03 14:30 PST, the
 snapshot of every rank in the report. Jobs submitted after that snapshot are outside the report.
 
 Columns: `track`, `job`, `program_version`, `program_md5_prefix`, `harness_commit`, `completed` (date), `score` (as
@@ -48,7 +48,7 @@ reported, to five decimals), `rank` and `rows` (position and number of rows in t
 the row appeared), `rank_snapshot_pt` (that snapshot, Pacific time).
 
 - In the snapshot of 2026-11-03 14:30 PST the best Instruction Following job (1701) was third of 56, the Robustness
-  job (1702) first of 35, and FF Omnimind first of the 27 entries with all four tracks in the site's Overall ranking
+  job (1702) first of 35, and FF OmniMind first of the 27 entries with all four tracks in the site's Overall ranking
   (0.8698).
 - Four earlier jobs ended without a track score: a connection probe (1635) and three submissions of v3.5 (1671, 1675
   and 1687).
