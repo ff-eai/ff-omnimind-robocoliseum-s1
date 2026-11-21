@@ -1,10 +1,10 @@
-# FF Omnimind: RoboColiseum Season I
+# FF OmniMind: RoboColiseum Season I
 
 Code behind the technical report
 
 *Write Once, Run with Zero Cloud Tokens: Code-as-Policy Skills Discovered in Simulation by a Coding Agent*.
 
-FF Omnimind is the RoboColiseum Season I entry of FF EAI Robotics Ecosystem Inc.
+FF OmniMind is the RoboColiseum Season I entry of FF EAI Robotics Ecosystem Inc.
 
 | Path | Content |
 |---|---|

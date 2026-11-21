@@ -1,6 +1,6 @@
 # Recount of the platform's task scores
 
-Report: Section 4.2.
+Report: Appendix D (panel a) and Section 4.2 (panel b).
 
 ## Method
 
